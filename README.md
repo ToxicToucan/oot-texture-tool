@@ -4,7 +4,7 @@
 
 ![The texture tool window](docs/screenshot.png)
 
-- **Find** any of the game's 20,000+ textures by typing part of its name.
+- **Find** any of the game's 20,000+ textures by typing part of its name. Type `model:` and a model name (for example `model:player_adult`) to list just the textures that model uses.
 - **Preview** the texture, with its format, size, mip levels and whether it can be imported.
 - **Export** it as a PNG to edit in any paint program, or as a DDS in its own format.
 - **Import** your edited PNG or DDS into a mod folder. Every mip level is rebuilt from your image. BC1, BC3, BC4, BC5, BC7 and ASTC textures can be imported: about 97% of the game's textures.
@@ -86,6 +86,7 @@ The first time, open **Settings...** and point it at your game's `romfs` folder 
 As an example, this guide recolours adult Link's hair.
 
 1. **Find the texture.** Type `hairs adult` in the search box. Words can be in any order. Click `Mt_Hairs_Player_Adult_Alb`.
+   - Scroll over the preview to zoom in; drag to move around.
 2. **Check it.** The panel shows `Format: BC7`, the size (768 x 768) and **"Can be imported: yes"**.
 3. **Export.** Click **Export PNG...** and save it somewhere handy, such as your Desktop.
 4. **Edit.** Open the PNG in your paint program (GIMP, Paint.NET, Photoshop, Krita...) and make your changes.

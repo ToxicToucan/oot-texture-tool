@@ -8,6 +8,7 @@ It never writes to the game's romfs, merged\\bin or merged\\work: imports go onl
 """
 import io
 import json
+import math
 import os
 import queue
 import shutil
@@ -500,6 +501,7 @@ class App:
         self.bmexp.pack(side='left', padx=(6, 0))
         self.mdl, self.mdl_tex, self.yaw, self.pitch, self.zoom, self.drag = None, {}, 0.5, -0.2, 1.0, None
         self.override = None      # a recoloured or edited image shown instead of the texture (not imported yet)
+        self.tzoom, self.tpan = 1.0, (0.0, 0.0)   # texture view zoom (wheel) and offset (drag)
         self.recolour_win = None
         self.edit_file, self.edit_mtime = None, None
         btns = ttk.Frame(right)
@@ -582,7 +584,18 @@ class App:
     def filter(self):
         words = self.q.get().lower().split()
         only = self.only_mod.get()
-        self.shown = [n for n in self.names if all(w in n.lower() for w in words) and (not only or n in self.modded)]
+        # "model:name" keeps the textures of the models whose name contains it (once the model list is built)
+        mwords = [w[6:] for w in words if w.startswith('model:') and len(w) > 6]
+        words = [w for w in words if not w.startswith('model:')]
+        allowed = None
+        if mwords:
+            idx = self.be.model_index()
+            if idx is None:
+                self.say('model: searches need the model list; open View: On model once to build it.')
+            else:
+                allowed = {t + '.bntx.zs' for m, ts in idx.items() if all(w in m.lower() for w in mwords) for t in ts}
+        self.shown = [n for n in self.names if all(w in n.lower() for w in words) and (not only or n in self.modded)
+                      and (allowed is None or n in allowed)]
         self.lb.delete(0, 'end')
         self.lb.insert('end', *[n[:-8] + (self.MOD_MARK if n in self.modded else '') for n in self.shown])
         self.count.config(text='%d of %d' % (len(self.shown), len(self.names)))
@@ -648,6 +661,7 @@ class App:
     def show(self, name, path, orig, info, img):
         if name != self.name:
             self.end_override()
+            self.tzoom, self.tpan = 1.0, (0.0, 0.0)
         self.name, self.path, self.orig, self.info, self.img = name, path, orig, info, img
         scale = self.draw()
         self.title.config(text=name[:-8])
@@ -753,11 +767,17 @@ class App:
         self.work('Loading the model %s...' % name, job, done)
 
     def drag_start(self, e):
-        self.drag = (e.x, e.y, self.yaw, self.pitch)
+        self.drag = (e.x, e.y, self.yaw, self.pitch, self.tpan)
 
     def drag_move(self, e):
+        if self.drag and self.view.get() == 'texture' and self.img is not None and self.tzoom > 1:
+            x, y, _, _, pan = self.drag
+            s = self.draw_scale()
+            self.tpan = (pan[0] - (e.x - x) / s, pan[1] - (e.y - y) / s)
+            self.draw()
+            return
         if self.drag and self.view.get() == 'model' and self.mdl:
-            x, y, yaw, pitch = self.drag
+            x, y, yaw, pitch, _ = self.drag
             self.yaw = yaw + (e.x - x) * 0.01
             self.pitch = max(-1.5, min(1.5, pitch + (e.y - y) * 0.01))
             self.draw(fast=True)
@@ -767,7 +787,20 @@ class App:
         if self.view.get() == 'model':
             self.draw()
 
+    def draw_scale(self):
+        cw, ch = max(16, self.canvas.winfo_width() - 4), max(16, self.canvas.winfo_height() - 4)
+        img = self.override or self.img
+        fit = min(cw / img.width, ch / img.height)
+        return (max(1, int(fit)) if fit > 1 else fit) * self.tzoom
+
     def wheel(self, e):
+        if self.view.get() == 'texture' and self.img is not None:
+            self.tzoom = max(1.0, min(32.0, self.tzoom * (1.25 if e.delta > 0 else 0.8)))
+            if self.tzoom == 1.0:
+                self.tpan = (0.0, 0.0)
+            self.draw()
+            self.say('Texture zoom %d%%%s' % (round(self.draw_scale() * 100), ' - drag to move' if self.tzoom > 1 else ''))
+            return
         if self.view.get() == 'model' and self.mdl:
             self.zoom = max(0.3, min(12.0, self.zoom * (1.15 if e.delta > 0 else 1 / 1.15)))
             self.draw()
@@ -809,11 +842,21 @@ class App:
         if img is None or self.info is None:
             return 1
         cw, ch = max(16, self.canvas.winfo_width() - 4), max(16, self.canvas.winfo_height() - 4)
-        scale = min(cw / img.width, ch / img.height)
-        if scale > 1:
-            scale = max(1, int(scale))   # whole steps when enlarging small textures
-        size = (max(1, round(img.width * scale)), max(1, round(img.height * scale)))
-        view = img.resize(size, Image.NEAREST if scale >= 1 else Image.LANCZOS)
+        fit = min(cw / img.width, ch / img.height)
+        if fit > 1:
+            fit = max(1, int(fit))   # whole steps when enlarging small textures
+        scale = fit * self.tzoom
+        # the part of the texture in view (wheel zooms, drag moves), scaled to the screen
+        cx, cy = img.width / 2 + self.tpan[0], img.height / 2 + self.tpan[1]
+        hw, hh = cw / (2 * scale), ch / (2 * scale)
+        x0, y0 = max(0, int(cx - hw)), max(0, int(cy - hh))
+        x1, y1 = min(img.width, int(math.ceil(cx + hw))), min(img.height, int(math.ceil(cy + hh)))
+        self.canvas.delete('all')
+        if x1 <= x0 or y1 <= y0:
+            return scale
+        crop = img.crop((x0, y0, x1, y1))
+        size = (max(1, round((x1 - x0) * scale)), max(1, round((y1 - y0) * scale)))
+        view = crop.resize(size, Image.NEAREST if scale >= 1 else Image.LANCZOS)
         board = Image.new('RGBA', size, (200, 200, 200, 255))
         dark = Image.new('RGBA', (16, 16), (150, 150, 150, 255))
         for y in range(0, size[1], 16):
@@ -821,8 +864,9 @@ class App:
                 board.paste(dark, (x, y))
         board.alpha_composite(view)
         self.photo = ImageTk.PhotoImage(board)
-        self.canvas.delete('all')
-        self.canvas.create_image(self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2, image=self.photo)
+        ox = self.canvas.winfo_width() / 2 + (x0 - cx) * scale
+        oy = self.canvas.winfo_height() / 2 + (y0 - cy) * scale
+        self.canvas.create_image(ox, oy, image=self.photo, anchor='nw')
         return scale
 
     # --- buttons

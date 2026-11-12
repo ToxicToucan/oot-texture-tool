@@ -249,14 +249,19 @@ def render(model, textures, size=(512, 512), yaw=0.6, pitch=-0.25, highlight=Non
         sx = p[:, 0] * scale + W / 2
         sy = -p[:, 1] * scale + H / 2
         sz = -p[:, 2]
-        _raster(m, sx, sy, sz, p, tex, dim, light, W, H, zbuf, colour)
+        vshade = None
+        if m.nrm is not None and len(m.nrm) == len(m.pos):   # smooth shading from the mesh's own normals
+            n = m.nrm @ R.T
+            n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-12
+            vshade = (0.35 + 0.65 * np.abs(n @ light)).astype(np.float32)
+        _raster(m, sx, sy, sz, p, tex, dim, light, W, H, zbuf, colour, vshade)
     img = colour.reshape(H, W, 3)
     empty = np.isinf(zbuf).reshape(H, W)
     img[empty] = bg
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
-def _raster(m, sx, sy, sz, p, tex, dim, light, W, H, zbuf, colour):
+def _raster(m, sx, sy, sz, p, tex, dim, light, W, H, zbuf, colour, vshade=None):
     t = m.tris
     x, y, z = sx[t], sy[t], sz[t]                       # (n, 3)
     # face normals for shading (two-sided)
@@ -274,7 +279,7 @@ def _raster(m, sx, sy, sz, p, tex, dim, light, W, H, zbuf, colour):
             continue
         for chunk in range(0, len(sel), max(1, 400000 // (k * k))):
             ids = sel[chunk:chunk + max(1, 400000 // (k * k))]
-            _fill(ids, k, x, y, z, x0, y0, m, t, tex, dim, shade, W, H, zbuf, colour)
+            _fill(ids, k, x, y, z, x0, y0, m, t, tex, dim, shade, W, H, zbuf, colour, vshade)
 
 
 def _cutout(material):
@@ -282,7 +287,7 @@ def _cutout(material):
     return 'alphamask' in m or 'alpha' in m or 'hair' in m or 'fur' in m or 'eyelash' in m or 'leaf' in m or 'grass' in m
 
 
-def _fill(ids, k, x, y, z, x0, y0, m, t, tex, dim, shade, W, H, zbuf, colour):
+def _fill(ids, k, x, y, z, x0, y0, m, t, tex, dim, shade, W, H, zbuf, colour, vshade=None):
     gx, gy = np.meshgrid(np.arange(k), np.arange(k))
     px = (x0[ids, None] + gx.reshape(1, -1)) + 0.5        # (n, k*k) pixel centres in each triangle's box
     py = (y0[ids, None] + gy.reshape(1, -1)) + 0.5
@@ -317,10 +322,15 @@ def _fill(ids, k, x, y, z, x0, y0, m, t, tex, dim, shade, W, H, zbuf, colour):
         rgb = np.full((len(tri), 3), 170.0, np.float32)
     if not solid.all():
         tri, pix, depth, rgb = tri[solid], pix[solid], depth[solid], rgb[solid]
+        b0, b1, b2 = b0[solid], b1[solid], b2[solid]
     if dim:
         grey = rgb.mean(1, keepdims=True)
         rgb = grey * 0.55 + 40
-    rgb *= shade[tri, None]
+    if vshade is not None:
+        tv = t[tri]
+        rgb *= (b0 * vshade[tv[:, 0]] + b1 * vshade[tv[:, 1]] + b2 * vshade[tv[:, 2]])[:, None]
+    else:
+        rgb *= shade[tri, None]
     # nearest fragment per pixel, then against the z-buffer
     order = np.lexsort((depth, pix))
     pix, depth, rgb = pix[order], depth[order], rgb[order]
