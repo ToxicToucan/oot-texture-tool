@@ -9,6 +9,9 @@
 - **Export** it as a PNG to edit in any paint program, or as a DDS in its own format.
 - **Import** your edited PNG or DDS into a mod folder. Every mip level is rebuilt from your image. BC1, BC3, BC4, BC5, BC7 and ASTC textures can be imported: about 97% of the game's textures.
 - **See your mod's version** right away. Textures your mods replace are marked ◆, and **Show** flips between the original and each mod's copy.
+- **See it on the model.** **View: On model** draws the texture (or your mod's copy) on the character or object that uses it. Drag to turn it, scroll to zoom.
+
+![Pink hair on adult Link in the model view](docs/screenshot-model.png)
 
 The tool only reads the game's files. It writes to your mod folder and nowhere else.
 
@@ -38,10 +41,10 @@ You need Windows 10 or 11 (64-bit).
 
 The window runs on Python 3.12. Get it from [python.org](https://www.python.org/downloads/), and tick **"Add python.exe to PATH"** and **"py launcher"** during setup.
 
-Then open a Command Prompt and install Pillow (the image library):
+Then open a Command Prompt and install Pillow (the image library) and numpy (for the model view):
 
 ```bat
-py -3.12 -m pip install pillow
+py -3.12 -m pip install pillow numpy
 ```
 
 ### 2. Install Python 3.14 or later
@@ -95,6 +98,11 @@ As an example, this guide recolours adult Link's hair.
    4. The preview now shows your version. Use **Show** to compare it with the original.
 
 ![The window after importing a pink version](docs/screenshot-mod.png)
+
+   5. To see it on Link, pick **View: On model**. The model list shows every model that uses the texture, with the likeliest first (`Player_Adult` here).
+      - The meshes that use your texture are drawn in colour; the rest of the model is dimmed.
+      - Drag to turn it and scroll to zoom.
+      - The first time, the tool builds its list of models and textures, which takes about 30 seconds.
 6. **Turn it on.** Open the game's **Mods** tab, turn your mod on, then restart the game.
    - If the tool made the **`~Size table (made by the texture tool)`** mod (see [ASTC textures and the size table](#astc-textures-and-the-size-table)), turn that on too, and keep it last.
 
@@ -228,6 +236,9 @@ Environment variables: `TEXCONV_DIR` (folder with `texconv.exe`), `PY_ZSTD` (the
 | *The game textures folder was not found* | Set **Game romfs folder** to the folder that contains `Tex` and `Pack`. |
 | *Wrong PNG size* | Resize the PNG to exactly the size shown in the panel. Editing the exported PNG keeps it right. |
 | *cannot be imported* | The texture is BC2 or BC6H. See [What can be imported](#what-can-be-imported). |
+| *No model uses this texture directly* | Some textures are only used by effects, the menus or the map. Use the Texture view. |
+| *keeps its meshes in a form this preview cannot read yet* | Terrain and some map pieces store their meshes differently. Pick another model from the list. |
+| *The model view needs numpy* | Run `py -3.12 -m pip install numpy`. |
 | *Wrong DDS format* | Save the DDS in the format the panel shows (the mod's copy of an ASTC texture is BC7), or import a PNG instead. |
 | *unknown command encode-bc1* or similar | Your `texconv.exe` is from v0.1 or v0.2. Get `texconv-windows-x64.zip` from the latest release. |
 | *Pillow missing* | Run `py -3.12 -m pip install pillow`. |
@@ -264,12 +275,20 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 - Signed BC4/BC5 blocks become unsigned by flipping the top bit of their two endpoint bytes. That keeps the block's mode and steps, so the round trip is exact.
 - An ASTC texture's container is laid out again for BC7: new mip offsets, then the data block, relocation table and header pointers are moved. The resource size table (CRC32 of each file's path, mapped to the size it needs: unpacked size + 280 for textures) is merged for every mod into the size table mod.
 
+**The model view:**
+- `model_index.py` (Python 3.14+) reads each of the game's 6,409 models (`Model\*.bfres.zs`) once. It records which textures each model names, and caches the list in `%LOCALAPPDATA%\oot-texture-gui\model_index.json`.
+- `bfres_model.py` reads a model (BFRES version 10, the same as *Tears of the Kingdom*): each shape's full-detail mesh, its material's texture names, and the skeleton, which places rigid parts like the eyes.
+- It draws the model with a small software renderer in numpy (a z-buffer, with cut-outs for materials like hair and fur) at a fraction of a second per frame. Skinned meshes are drawn in their rest pose.
+- Numbered textures (`…_Alb.0` to `…_Alb.13`) are variants the game swaps into the `.0` slot, so any of them shows in that slot.
+
 | File | Purpose |
 | --- | --- |
 | `Texture Tool.cmd` | Double-click launcher |
 | `texture_gui.pyw` | The window (Tkinter) |
 | `texture_tool.py` | Export and import; also a command-line tool |
 | `zs_helper.py` | zstd with the game's dictionaries |
+| `bfres_model.py` | Reads models and draws them for the model view |
+| `model_index.py` | Lists which models use which textures (Python 3.14+) |
 | `texconv.cpp`, `build-texconv.cmd` | The codec helper (ASTC decode; BC1, BC3, BC4, BC5, BC7 encode) and its build script |
 | `textures/` | The `astc2bc7` library that `texconv` links (ASTC decode, BC7 encode) |
 
@@ -281,7 +300,7 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 - [ARM astc-encoder](https://github.com/ARM-software/astc-encoder) (Apache-2.0) decodes ASTC.
 - [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo) by Richard Geldreich, Jr. and Binomial LLC: bc7e (Apache-2.0) encodes BC7, and rgbcx (MIT or public domain) encodes BC1 to BC5.
 - [Intel ISPC](https://github.com/ispc/ispc) (BSD-3-Clause) compiles bc7e.
-- The BNTX field layout follows the notes in [Switch-Toolbox](https://github.com/KillzXGaming/Switch-Toolbox).
+- The BNTX and BFRES field layouts follow the notes in [Switch-Toolbox](https://github.com/KillzXGaming/Switch-Toolbox) and BfresLibrary, checked against this game's files.
 
 The licence texts for the third-party parts are in [textures/licenses](textures/licenses).
 

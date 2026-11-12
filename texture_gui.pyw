@@ -216,6 +216,116 @@ class Backend:
             out.append((label, os.path.join(self.cfg['mods'], m, 'romfs', 'Tex', name), m == winner))
         return out
 
+    # --- models (the model view)
+    @property
+    def index_path(self):
+        d = os.path.join(os.environ.get('LOCALAPPDATA', HERE), 'oot-texture-gui')
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, 'model_index.json')
+
+    def model_index(self):
+        """{model: [texture, ...]} from the cache, or None when it is missing or for another romfs."""
+        if getattr(self, '_index', None) is not None:
+            return self._index
+        try:
+            j = json.load(open(self.index_path, encoding='utf-8'))
+            if norm(j['romfs']) != norm(self.cfg['romfs']):
+                return None
+            self._index = j['index']
+            users = {}
+            for m, ts in self._index.items():
+                for t in ts:
+                    users.setdefault(t, []).append(m)
+            self._users = users
+            return self._index
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def build_model_index(self):
+        script = os.path.join(HERE, 'model_index.py')
+        if not os.path.exists(script):
+            raise ToolError('model_index.py is missing next to this program.')
+        r = subprocess.run(tt.PY_ZSTD + ['-I', script, self.cfg['romfs'], self.index_path], capture_output=True, text=True,
+                           creationflags=NO_WINDOW)
+        if r.returncode:
+            raise ToolError('Building the model list failed:\n' + (r.stderr or r.stdout).strip()[-800:])
+        self._index = None
+        if self.model_index() is None:
+            raise ToolError('The model list was not written.')
+        return len(self._index)
+
+    def models_for(self, name):
+        """Models that use a texture, best guess first: the model named in the texture's name, then fewer textures."""
+        if self.model_index() is None:
+            return None
+        tex = self.model_slot(name)
+        users = self._users.get(tex, [])
+        words = set(tex.lower().split('_'))
+
+        def score(m):
+            base = m.split('.')[0]
+            named = base.lower() in tex.lower()
+            shared = len(words & set(base.lower().split('_')))
+            return (not named, -shared, len(self._index.get(m, [])), m.lower())
+        return sorted(users, key=score)
+
+    def model_slot(self, name):
+        """The texture name models use for this texture. Numbered variants (X_Alb.0 .. X_Alb.13, swapped in by the
+        game) are all named X_Alb.0 in the model, so .N shows in the .0 slot."""
+        tex = name[:-8] if name.endswith('.bntx.zs') else name
+        if self.model_index() is not None and tex not in self._users:
+            base, dot, num = tex.rpartition('.')
+            if dot and num.isdigit() and base + '.0' in self._users:
+                return base + '.0'
+        return tex
+
+    def load_model(self, model):
+        import bfres_model
+        cache = getattr(self, '_models', None)
+        if cache is None:
+            cache = self._models = {}
+        if model in cache:
+            return cache[model]
+        src = os.path.join(self.cfg['romfs'], 'Model', model + '.bfres.zs')
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                data, _ = tt.unzs(src, tt.game_romfs(None), tmp)
+            m = bfres_model.parse(data, model)
+        except TOOL_ERRORS as e:
+            raise ToolError(str(e))
+        except Exception as e:
+            raise ToolError('Could not read the model %s: %s' % (model, e))
+        if len(cache) > 6:
+            cache.pop(next(iter(cache)))
+        cache[model] = m
+        return m
+
+    def model_textures(self, model, skip=()):
+        """{texture: RGBA numpy array} for each mesh's colour texture (small mip levels; cached)."""
+        import numpy as np
+        cache = getattr(self, '_tex_small', None)
+        if cache is None:
+            cache = self._tex_small = {}
+        out = {}
+        for m in model.meshes:
+            t = next((x for x in m.textures if x.endswith('_Alb')), None)
+            if not t or t in skip:
+                continue
+            if t not in cache:
+                p = self.path(t + '.bntx.zs')
+                if not os.path.exists(p):
+                    cache[t] = None
+                    continue
+                try:
+                    _, img = tt.decode_mip0(p, 512) if 'max_size' in tt.decode_mip0.__code__.co_varnames else tt.decode_mip0(p)
+                    img.thumbnail((512, 512))
+                    cache[t] = np.asarray(img.convert('RGBA'))
+                except Exception:
+                    cache[t] = None
+            if cache[t] is not None:
+                out[t] = cache[t]
+        return out
+
     def mods(self):
         try:
             return sorted((d for d in os.listdir(self.cfg['mods']) if os.path.isdir(os.path.join(self.cfg['mods'], d))
@@ -364,6 +474,17 @@ class App:
         self.vercb = ttk.Combobox(vrow, textvariable=self.ver, state='disabled', width=58)
         self.vercb.pack(side='left', padx=(4, 0))
         self.vercb.bind('<<ComboboxSelected>>', lambda _: self.pick_version())
+        mrow = ttk.Frame(right)
+        mrow.pack(anchor='w', fill='x', pady=(0, 6))
+        self.view = tk.StringVar(value='texture')
+        ttk.Label(mrow, text='View:').pack(side='left')
+        ttk.Radiobutton(mrow, text='Texture', value='texture', variable=self.view, command=self.set_view).pack(side='left', padx=(4, 0))
+        ttk.Radiobutton(mrow, text='On model', value='model', variable=self.view, command=self.set_view).pack(side='left', padx=(4, 8))
+        self.model = tk.StringVar()
+        self.modelcb = ttk.Combobox(mrow, textvariable=self.model, state='disabled', width=46)
+        self.modelcb.pack(side='left')
+        self.modelcb.bind('<<ComboboxSelected>>', lambda _: self.pick_model())
+        self.mdl, self.mdl_tex, self.yaw, self.pitch, self.zoom, self.drag = None, {}, 0.5, -0.2, 1.0, None
         btns = ttk.Frame(right)
         btns.pack(anchor='w', pady=(0, 6))
         self.bexp = ttk.Button(btns, text='Export PNG...', command=lambda: self.export('.png'), state='disabled')
@@ -376,6 +497,10 @@ class App:
                                 highlightbackground='#aaa', bg='#ddd')
         self.canvas.pack(fill='both', expand=True)
         self.canvas.bind('<Configure>', lambda _: self.draw())
+        self.canvas.bind('<ButtonPress-1>', self.drag_start)
+        self.canvas.bind('<B1-Motion>', self.drag_move)
+        self.canvas.bind('<ButtonRelease-1>', self.drag_end)
+        self.canvas.bind('<MouseWheel>', self.wheel)
         body.add(right, weight=2)
 
         self.status = ttk.Label(root, text='', relief='sunken', anchor='w', padding=(6, 2))
@@ -522,10 +647,130 @@ class App:
         self.bimp.config(state='normal')
         self.say('%s: %s, %d x %d, %d mip levels; showing %s' % (name, info['format'], info['w'], info['h'], info['mips'],
                                                                  current))
+        if self.view.get() == 'model':
+            self.root.after(10, self.load_models)
 
-    def draw(self):
+    # --- model view
+    def set_view(self):
+        if self.view.get() == 'model':
+            try:
+                import numpy  # noqa: F401
+            except ImportError:
+                self.view.set('texture')
+                self.error('numpy missing', ToolError('The model view needs numpy:\n\n  py -3.12 -m pip install numpy'))
+                return
+            self.load_models()
+        else:
+            self.modelcb.config(state='disabled')
+            self.draw()
+
+    def load_models(self):
+        """Fill the model list for the shown texture (building the model list once if needed), then show the first."""
+        if not self.name or self.view.get() != 'model':
+            return
+        if self.busy:
+            return self.root.after(200, self.load_models)
+        models = self.be.models_for(self.name)
+        if models is None:
+            def done(n, err):
+                if err:
+                    self.view.set('texture')
+                    self.error('Model list not built', err)
+                else:
+                    self.say('Model list built: %d models use textures' % n)
+                    self.load_models()
+            self.work('Building the list of models and their textures (once, about 30 seconds)...', self.be.build_model_index, done)
+            return
+        if not models:
+            self.modelcb.config(values=[], state='disabled')
+            self.model.set('No model uses this texture directly')
+            self.mdl = None
+            self.draw()
+            return
+        self.modelcb.config(values=models, state='readonly')
+        if self.model.get() not in models:
+            self.model.set(models[0])
+            self.pick_model()
+        else:
+            self.draw()
+
+    def pick_model(self):
+        name = self.model.get()
+        if self.busy:
+            return self.root.after(200, self.pick_model)
+
+        def job():
+            m = self.be.load_model(name)
+            return m, self.be.model_textures(m)
+
+        def done(res, err):
+            if err:
+                self.mdl = None
+                self.error('Could not show the model', err)
+                return
+            self.mdl, self.mdl_tex = res
+            self.yaw, self.pitch, self.zoom = 0.5, -0.2, 1.0
+            if not self.mdl.meshes:
+                self.say('%s: no meshes this preview can read' % name)
+                self.draw()
+                return
+            used = sum(1 for m in self.mdl.meshes if self.name and self.be.model_slot(self.name) in m.textures)
+            self.say('%s: %d meshes, %d use %s. Drag to turn, wheel to zoom.' % (name, len(self.mdl.meshes), used, self.name[:-8]))
+            self.draw()
+        self.work('Loading the model %s...' % name, job, done)
+
+    def drag_start(self, e):
+        self.drag = (e.x, e.y, self.yaw, self.pitch)
+
+    def drag_move(self, e):
+        if self.drag and self.view.get() == 'model' and self.mdl:
+            x, y, yaw, pitch = self.drag
+            self.yaw = yaw + (e.x - x) * 0.01
+            self.pitch = max(-1.5, min(1.5, pitch + (e.y - y) * 0.01))
+            self.draw(fast=True)
+
+    def drag_end(self, e):
+        self.drag = None
+        if self.view.get() == 'model':
+            self.draw()
+
+    def wheel(self, e):
+        if self.view.get() == 'model' and self.mdl:
+            self.zoom = max(0.3, min(12.0, self.zoom * (1.15 if e.delta > 0 else 1 / 1.15)))
+            self.draw()
+
+    def draw_model(self, fast=False):
+        import numpy as np
+        from PIL import Image, ImageTk
+        cw, ch = max(16, self.canvas.winfo_width() - 4), max(16, self.canvas.winfo_height() - 4)
+        self.canvas.delete('all')
+        if self.mdl is None or not self.mdl.meshes:
+            msg = (self.model.get() or 'No model') if self.mdl is None else (
+                '%s keeps its meshes in a form this preview cannot read yet\n(terrain and some map pieces).\n'
+                'Pick another model from the list, or use the Texture view.' % self.mdl.name)
+            self.canvas.create_text(cw // 2, ch // 2, text=msg, fill='#555', justify='center')
+            return 1
+        import bfres_model
+        tex = dict(self.mdl_tex)
+        hl = self.be.model_slot(self.name) if self.name else None
+        if hl and self.img is not None:
+            small = self.img.copy()
+            small.thumbnail((1024, 1024))
+            tex[hl] = np.asarray(small.convert('RGBA'))
+        k = 2 if fast else 1
+        out = bfres_model.render(self.mdl, tex, (cw // k, ch // k), self.yaw, self.pitch, highlight=hl, zoom=self.zoom)
+        img = Image.fromarray(out)
+        if k > 1:
+            img = img.resize((cw, ch), Image.NEAREST)
+        self.photo = ImageTk.PhotoImage(img)
+        self.canvas.create_image(self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2, image=self.photo)
+        return 1
+
+    def draw(self, fast=False):
         """Draw the image to fit the preview area (on a checkerboard, so see-through parts show); returns the scale."""
         from PIL import Image, ImageTk
+        if self.view.get() == 'model':
+            return self.draw_model(fast)
         img = self.img
         if img is None or self.info is None:
             return 1
