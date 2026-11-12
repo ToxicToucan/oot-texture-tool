@@ -382,6 +382,114 @@ class Backend:
                 out[t] = cache[key]
         return out
 
+    # --- levels (the Levels tab)
+    def level_index(self):
+        """{"Area/Level": [[actor, model, x, y, z, rx, ry, rz, sx, sy, sz], ...]} from the cache, or None."""
+        if getattr(self, '_levels', None) is not None:
+            return self._levels
+        try:
+            j = json.load(open(os.path.join(os.path.dirname(self.index_path), 'level_index.json'), encoding='utf-8'))
+            if norm(j['romfs']) != norm(self.cfg['romfs']):
+                return None
+            self._levels = j['levels']
+            return self._levels
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def build_level_index(self):
+        script = os.path.join(HERE, 'level_index.py')
+        if not os.path.exists(script):
+            raise ToolError('level_index.py is missing next to this program.')
+        r = subprocess.run(tt.PY_ZSTD + ['-I', script, self.cfg['romfs'],
+                                         os.path.join(os.path.dirname(self.index_path), 'level_index.json')],
+                           capture_output=True, text=True, creationflags=NO_WINDOW)
+        if r.returncode:
+            raise ToolError('Building the level list failed:\n' + (r.stderr or r.stdout).strip()[-800:])
+        self._levels = None
+        if self.level_index() is None:
+            raise ToolError('The level list was not written.')
+        return len(self._levels)
+
+    def unzs_many(self, pairs):
+        """Unpack many .zs files in one helper run: pairs of (source, destination)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            lst = os.path.join(tmp, 'list.txt')
+            with open(lst, 'w', encoding='utf-8') as fp:
+                fp.write('\n'.join('%s\t%s' % p for p in pairs))
+            subprocess.run(tt.PY_ZSTD + ['-I', os.path.join(HERE, 'zs_helper.py'), 'D', tt.game_romfs(None), lst, '-'],
+                           capture_output=True, text=True, creationflags=NO_WINDOW)
+
+    def load_level(self, name, say=lambda text: None, far=False):
+        """(level model, light copy for moving, {texture: RGBA array}) for a level of the level list. far: include the
+        distant scenery (mountains, far-off towns) that surrounds outdoor levels."""
+        import bfres_model
+        import level_view
+        rows = (self.level_index() or {}).get(name)
+        if rows is None:
+            raise ToolError('%s is not in the level list.' % name)
+        cache = getattr(self, '_models', None)
+        if cache is None:
+            cache = self._models = {}
+        skip = None if far else level_view.is_far
+        want = sorted({r[1] for r in rows if r[1] and r[1] not in cache and r[1] not in getattr(self, '_flat', ())
+                       and (far or not level_view.is_far(r))})
+        if want:
+            say('Reading %d models of %s...' % (len(want), name))
+            with tempfile.TemporaryDirectory() as tmp:
+                self.unzs_many([(os.path.join(self.cfg['romfs'], 'Model', m + '.bfres.zs'), os.path.join(tmp, '%d.bin' % i))
+                                for i, m in enumerate(want)])
+                for i, m in enumerate(want):
+                    try:
+                        cache[m] = bfres_model.parse(open(os.path.join(tmp, '%d.bin' % i), 'rb').read(), m)
+                    except Exception:  # noqa: BLE001 - unreadable models are left out of the level
+                        cache[m] = None
+        say('Putting %s together...' % name)
+        model = level_view.build(name, rows, cache.get, skip)
+        say('Reading the textures of %s...' % name)
+        tex = self.level_textures(model, say)
+        return model, level_view.light(model), tex
+
+    def level_textures(self, model, say=lambda text: None):
+        """{texture: small RGBA array} for a level's colour textures (the copy the game would load). The game's own
+        copies are kept small on disk after the first time, so a level opens quickly the next time."""
+        import numpy as np
+        from PIL import Image
+        order, off = self.mod_order()
+        live = [m for m in reversed(order) if m not in off and m != SIZE_MOD]
+        thumbs = os.path.join(os.path.dirname(self.index_path), 'level_textures')
+        os.makedirs(thumbs, exist_ok=True)
+        names = sorted({next((t for t in m.textures if t.endswith('_Alb')), None) for m in model.meshes} - {None})
+        out, todo = {}, []
+        for t in names:
+            p = next((q for q in (os.path.join(self.cfg['mods'], mod, 'romfs', 'Tex', t + '.bntx.zs') for mod in live)
+                      if os.path.exists(q)), self.path(t + '.bntx.zs'))
+            if not os.path.exists(p):
+                continue
+            thumb = os.path.join(thumbs, t + '.png')
+            if p == self.path(t + '.bntx.zs') and os.path.exists(thumb) and os.path.getmtime(thumb) >= os.path.getmtime(p):
+                try:
+                    out[t] = np.asarray(Image.open(thumb).convert('RGBA'))
+                    continue
+                except OSError:
+                    pass
+            todo.append((t, p, thumb if p == self.path(t + '.bntx.zs') else None))
+        if todo:
+            with tempfile.TemporaryDirectory() as tmp:
+                self.unzs_many([(p, os.path.join(tmp, '%d.bin' % i)) for i, (_, p, _) in enumerate(todo)])
+                for i, (t, p, thumb) in enumerate(todo):
+                    if i % 20 == 0:
+                        say('Reading the textures of %s: %d of %d (only the first time)...' % (model.name, i, len(todo)))
+                    try:
+                        _, img = tt.decode_data(open(os.path.join(tmp, '%d.bin' % i), 'rb').read(), 64, tmp)
+                        img.thumbnail((64, 64))
+                        img = img.convert('RGBA')
+                        if thumb:
+                            img.save(thumb)
+                        out[t] = np.asarray(img)
+                    except Exception:  # noqa: BLE001 - shown grey
+                        pass
+        return out
+
     def mods(self):
         try:
             return sorted((d for d in os.listdir(self.cfg['mods']) if os.path.isdir(os.path.join(self.cfg['mods'], d))
@@ -535,8 +643,30 @@ class App:
         msb.pack(side='right', fill='y')
         self.mlb.bind('<<ListboxSelect>>', lambda _: self.models_tab_select())
         self.tabs.add(mtab, text='Models')
-        self.tabs.bind('<<NotebookTabChanged>>', lambda _: self.fill_models() if self.tabs.index('current') == 1 else None)
-        self.models_all = []
+        ltab = ttk.Frame(self.tabs)
+        ltop = ttk.Frame(ltab)
+        ltop.pack(fill='x', pady=(4, 4))
+        ttk.Label(ltop, text='Find:').pack(side='left')
+        self.lq = tk.StringVar()
+        self.lq.trace_add('write', lambda *_: self.fill_levels())
+        ttk.Entry(ltop, textvariable=self.lq, width=20).pack(side='left', padx=4, fill='x', expand=True)
+        self.lcount = ttk.Label(ltop, text='')
+        self.lcount.pack(side='left')
+        self.far = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ltab, text='Show far scenery (distant mountains, sky)', variable=self.far,
+                        command=lambda: self.level and self.open_level(self.level)).pack(anchor='w', side='bottom')
+        llist = ttk.Frame(ltab)
+        llist.pack(fill='both', expand=True)
+        self.llb = tk.Listbox(llist, activestyle='none', exportselection=False, font=('Segoe UI', 9))
+        lsb = ttk.Scrollbar(llist, orient='vertical', command=self.llb.yview)
+        self.llb.config(yscrollcommand=lsb.set)
+        self.llb.pack(side='left', fill='both', expand=True)
+        lsb.pack(side='right', fill='y')
+        self.llb.bind('<<ListboxSelect>>', lambda _: self.levels_tab_select())
+        self.tabs.add(ltab, text='Levels')
+        self.tabs.bind('<<NotebookTabChanged>>', lambda _: self.tab_changed())
+        self.models_all, self.levels_all = [], []
+        self.level, self.level_light, self.level_pan = None, None, None
         body.add(self.tabs, weight=1)
 
         right = ttk.Frame(body, padding=(8, 0, 0, 0))
@@ -610,6 +740,10 @@ class App:
         self.canvas.bind('<B3-Motion>', self.rotate_move)
         self.canvas.bind('<ButtonRelease-3>', self.rotate_end)
         self.canvas.bind('<Motion>', self.hover)
+        self.canvas.bind('<ButtonPress-2>', self.pan_start)      # levels: middle-drag (or Shift+drag) moves the view
+        self.canvas.bind('<B2-Motion>', self.pan_move)
+        self.canvas.bind('<ButtonRelease-2>', lambda e: self.schedule_draw())
+        self.canvas.bind('<Double-Button-1>', self.centre_on)
         body.add(right, weight=2)
 
         self.status = ttk.Label(root, text='', relief='sunken', anchor='w', padding=(6, 2))
@@ -800,6 +934,14 @@ class App:
             return
         if self.busy:
             return self.root.after(200, self.load_models)
+        if self.level:
+            slot = self.be.model_slot(self.name)
+            if any(slot in m.textures for m in self.mdl.meshes):   # stay in the level, with the texture lit up
+                self.draw()
+                self.say(getattr(self, 'level_note', None) or '%s in %s: shown in gold, the rest dimmed.' % (slot, self.level))
+                self.level_note = None
+                return
+            self.leave_level()
         models = self.be.models_for(self.name)
         if models is None:
             def done(n, err):
@@ -824,6 +966,8 @@ class App:
 
     def pick_model(self):
         name = self.model.get()
+        if self.level:
+            return self.draw()
         if self.busy:
             return self.root.after(200, self.pick_model)
         if name in getattr(self.be, '_flat', ()):
@@ -866,6 +1010,10 @@ class App:
     def drag_start(self, e):
         self.drag = (e.x, e.y, self.yaw, self.pitch, self.tpan)
         self.moved = False
+        self.pan_drag = bool(self.level and self.view.get() == 'model' and e.state & 0x1 and not self.painting.get())
+        if self.pan_drag:
+            self.pan_start(e)
+            return
         self.last_paint = None
         if self.view.get() == 'model' and self.painting.get() and self.mdl:
             self.undo.append(None if self.override is None else self.override.copy())
@@ -878,6 +1026,9 @@ class App:
         x, y, yaw, pitch, pan = self.drag
         if abs(e.x - x) + abs(e.y - y) > 3:
             self.moved = True
+        if getattr(self, 'pan_drag', False):
+            self.pan_move(e)
+            return
         if self.view.get() == 'texture' and self.img is not None and self.tzoom > 1:
             s = self.draw_scale()
             self.tpan = (pan[0] - (e.x - x) / s, pan[1] - (e.y - y) / s)
@@ -894,6 +1045,10 @@ class App:
     def drag_end(self, e):
         moved = getattr(self, 'moved', True)
         self.drag = None
+        if getattr(self, 'pan_drag', False):
+            self.pan_drag = False
+            self.schedule_draw()
+            return
         if self.view.get() == 'model' and self.mdl:
             if self.painting.get():
                 self.schedule_draw()
@@ -901,6 +1056,34 @@ class App:
                 self.pick_at(e.x, e.y)
             else:
                 self.schedule_draw()
+
+    def pan_start(self, e):
+        self.pdrag = (e.x, e.y, None if self.level_pan is None else self.level_pan.copy())
+
+    def pan_move(self, e):
+        """Levels: move the view (middle-drag or Shift+drag)."""
+        if not self.level or getattr(self, 'pdrag', None) is None or self.pdrag[2] is None or self.view.get() != 'model':
+            return
+        import bfres_model
+        x, y, start = self.pdrag
+        cw, ch = max(16, self.canvas.winfo_width() - 4), max(16, self.canvas.winfo_height() - 4)
+        per_px = 2.1 * self.mdl.radius / (self.zoom * min(cw, ch))      # world units per screen pixel
+        r = bfres_model.view_matrix(self.yaw, self.pitch)
+        self.level_pan = start - r[0] * (e.x - x) * per_px + r[1] * (e.y - y) * per_px
+        self.schedule_draw(fast=True)
+
+    def centre_on(self, e):
+        """Levels: double-click centres the view on the actor under the mouse."""
+        if not self.level or self.view.get() != 'model' or self.painting.get():
+            return
+        hit = self.pick_owner(e.x, e.y)
+        if hit is not None:
+            import numpy as np
+            row = self.mdl.rows[hit]
+            self.level_pan = np.array(row[2:5], np.float32)
+            self.zoom = max(self.zoom, 4.0)
+            self.say('Centred on %s. Wheel zooms, middle-drag or Shift+drag moves.' % row[0])
+            self.schedule_draw()
 
     def schedule_draw(self, fast=False):
         """Draw once per screen update, however many mouse events arrive; a sharp draw follows a pause."""
@@ -933,7 +1116,7 @@ class App:
             if self.painting.get() and e.state & 0x4:   # Ctrl+wheel: brush size
                 self.brush.set(max(1, min(80, self.brush.get() + (2 if e.delta > 0 else -2))))
                 return
-            self.zoom = max(0.3, min(30.0, self.zoom * (1.15 if e.delta > 0 else 1 / 1.15)))
+            self.zoom = max(0.3, min(300.0 if self.level else 30.0, self.zoom * (1.15 if e.delta > 0 else 1 / 1.15)))
             self.schedule_draw(fast=True)
 
     def focus_texture(self):
@@ -970,9 +1153,15 @@ class App:
         # draws at up to 900 pixels (450 while moving) and is scaled to the window
         k = max(1.0, max(cw, ch) / (450.0 if fast else 900.0))
         rw, rh = max(16, int(cw / k)), max(16, int(ch / k))
-        out, bufs = bfres_model.render(self.mdl, tex, (rw, rh), self.yaw, self.pitch, highlight=hl, zoom=self.zoom,
-                                       pick=True, dim_others=not self.painting.get())
+        mdl, frame = self.mdl, None
+        if self.level:   # levels: a fixed camera that the owner moves; a coarse copy while moving
+            mdl = self.level_light if fast and self.level_light is not None else self.mdl
+            frame = (self.level_pan, self.mdl.radius)
+        out, bufs = bfres_model.render(mdl, tex, (rw, rh), self.yaw, self.pitch, highlight=hl, zoom=self.zoom,
+                                       pick=True, dim_others=not self.painting.get(), frame=frame,
+                                       tint=(255, 200, 40) if self.level and not self.painting.get() else None)
         self.pickbuf = (bufs, rw, rh, cw, ch)
+        self.drawn = mdl
         img = Image.fromarray(out)
         if (rw, rh) != (cw, ch):
             img = img.resize((cw, ch), Image.NEAREST if fast else Image.BILINEAR)
@@ -988,7 +1177,8 @@ class App:
         """(mesh, u, v, texels per screen pixel) under a point of the preview, or None."""
         if not self.pickbuf:
             return None
-        (mid, ub, vb), rw, rh, cw, ch = self.pickbuf
+        bufs, rw, rh, cw, ch = self.pickbuf
+        mid, ub, vb = bufs[:3]
         ox = (self.canvas.winfo_width() - cw) / 2
         oy = (self.canvas.winfo_height() - ch) / 2
         ix, iy = int((x - ox) * rw / cw), int((y - oy) * rh / ch)
@@ -1007,16 +1197,40 @@ class App:
         step = sorted(steps)[len(steps) // 2] if steps else 0.002
         return i, float(ub[iy, ix]), float(vb[iy, ix]), step * rw / cw
 
+    def mesh_at(self, i):
+        """A mesh by the number the last drawing gave it (a level's coarse copy numbers its meshes differently)."""
+        return (getattr(self, 'drawn', None) or self.mdl).meshes[i]
+
+    def pick_owner(self, x, y):
+        """Levels: the index row of the actor under a point of the preview, or None."""
+        if not self.pickbuf or len(self.pickbuf[0]) < 4:
+            return None
+        bufs, rw, rh, cw, ch = self.pickbuf
+        ox = (self.canvas.winfo_width() - cw) / 2
+        oy = (self.canvas.winfo_height() - ch) / 2
+        ix, iy = int((x - ox) * rw / cw), int((y - oy) * rh / ch)
+        if not (0 <= ix < rw and 0 <= iy < rh) or bufs[3][iy, ix] < 0:
+            return None
+        return int(bufs[3][iy, ix])
+
     def pick_at(self, x, y):
         """Click on the model: select the texture of the part under the mouse (the reverse lookup)."""
         hit = self.pick(x, y)
         if hit is None:
             return
-        mesh = self.mdl.meshes[hit[0]]
+        mesh = self.mesh_at(hit[0])
         hl = self.focus_texture()
         tex = hl if hl in mesh.textures else next((t for t in mesh.textures if t.endswith('_Alb')), None) or \
             (mesh.textures[0] if mesh.textures else None)
         listing = ', '.join(mesh.textures) or 'no textures'
+        owner = self.pick_owner(x, y) if self.level else None
+        if owner is not None:
+            row = self.mdl.rows[owner]
+            self.level_note = '%s (model %s) at %.0f, %.0f, %.0f uses %s' % (row[0], row[1], row[2], row[3], row[4], listing)
+            self.say(self.level_note)
+            if tex and tex != hl:
+                self.select_texture(tex)
+            return
         if not tex:
             self.say('%s (material %s): %s' % (mesh.name, mesh.material, listing))
             return
@@ -1031,7 +1245,8 @@ class App:
             self.say('%s is not in the game\'s Tex folder' % tex)
             return
         self.browse = False
-        self.tabs.select(0)
+        if not self.level:   # in a level, the level list stays in front
+            self.tabs.select(0)
         if name not in self.shown:
             self.only_mod.set(False)
             self.q.set('')
@@ -1051,8 +1266,8 @@ class App:
             self.schedule_draw(fast=True)
             return
         i, u, v, step = hit
-        if hl not in self.mdl.meshes[i].textures:
-            self.say('Paint works on %s; that part uses %s.' % (hl, ', '.join(self.mdl.meshes[i].textures) or 'no texture'))
+        if hl not in self.mesh_at(i).textures:
+            self.say('Paint works on %s; that part uses %s.' % (hl, ', '.join(self.mesh_at(i).textures) or 'no texture'))
             return
         if self.override is None:
             self.override = self.img.convert('RGBA').copy()
@@ -1098,7 +1313,7 @@ class App:
     def sample_colour(self, e):
         """Right-click with Paint on: pick up the colour under the mouse (from the texture)."""
         hit = self.pick(e.x, e.y)
-        if hit is None or not self.focus_texture() or self.focus_texture() not in self.mdl.meshes[hit[0]].textures:
+        if hit is None or not self.focus_texture() or self.focus_texture() not in self.mesh_at(hit[0]).textures:
             return
         src = self.override or self.img
         W, H = src.size
@@ -1182,6 +1397,7 @@ class App:
         except ImportError:
             self.error('numpy missing', ToolError('The model view needs numpy:\n\n  py -3.12 -m pip install numpy'))
             return
+        self.leave_level()
         self.browse = True
         self.painting.set(False)
         self.view.set('model')
@@ -1193,6 +1409,95 @@ class App:
         self.details.config(text='%d textures. Click a part of the model to select its texture.' % len(idx.get(name, [])))
         self.canimport.config(text='')
         self.pick_model()
+
+    # --- the Levels tab
+    def tab_changed(self):
+        i = self.tabs.index('current')
+        if i == 1:
+            self.fill_models()
+        elif i == 2:
+            self.fill_levels()
+
+    def fill_levels(self):
+        idx = self.be.level_index()
+        self.llb.delete(0, 'end')
+        if idx is None:
+            self.levels_all = []
+            self.llb.insert('end', '(the level list is not built yet:', ' click here to build it, about a minute)')
+            self.lcount.config(text='')
+            return
+        words = self.lq.get().lower().split()
+        self.levels_all = [n for n in sorted(idx, key=str.lower) if all(w in n.lower() for w in words)]
+        self.llb.insert('end', *['%s   (%d placed)' % (n, len(idx[n])) for n in self.levels_all])
+        self.lcount.config(text='%d levels' % len(self.levels_all))
+
+    def levels_tab_select(self):
+        sel = self.llb.curselection()
+        if not sel or self.busy:
+            return
+        if not self.levels_all:
+            def done(n, err):
+                if err:
+                    self.error('Level list not built', err)
+                else:
+                    self.say('Level list built: %d levels' % n)
+                    self.fill_levels()
+            self.work('Building the list of levels and the models placed in them (once, about a minute)...',
+                      self.be.build_level_index, done)
+            return
+        self.open_level(self.levels_all[sel[0]])
+
+    def open_level(self, name):
+        """Show a whole level: every placed actor's model where the game puts it. Click a part to select its texture."""
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self.error('numpy missing', ToolError('The level view needs numpy:\n\n  py -3.12 -m pip install numpy'))
+            return
+        if self.be.model_index() is None:   # to know which models are terrain the preview cannot read
+            def built(n, err):
+                if err:
+                    self.error('Model list not built', err)
+                else:
+                    self.open_level(name)
+            self.work('Building the list of models and their textures (once, about 30 seconds)...',
+                      self.be.build_model_index, built)
+            return
+
+        def job():
+            return self.be.load_level(name, lambda text: setattr(self, 'progress', text), self.far.get())
+
+        def done(res, err):
+            if err:
+                self.error('Could not show the level', err)
+                return
+            self.leave_level()
+            self.mdl, self.level_light, self.mdl_tex = res
+            self.level, self.level_pan = name, self.mdl.centre.copy()
+            self.browse = True
+            self.painting.set(False)
+            self.yaw, self.pitch, self.zoom = 0.6, -0.7, 1.5
+            self.view.set('model')
+            self.modelcb.config(values=['Level: ' + name], state='readonly')
+            self.model.set('Level: ' + name)
+            self.bmexp.config(state='normal')
+            self.title.config(text=name)
+            rows = self.mdl.rows
+            shown = len({int(o) for m in self.mdl.meshes for o in numpy.unique(m.owner)})
+            ntri = sum(len(m.tris) for m in self.mdl.meshes)
+            self.details.config(text='%d placed actors, %d drawn (%d triangles); %d textures.\n'
+                                     'Terrain stored as "taskmesh" is not drawn yet.' % (
+                                         len(rows), shown, ntri, len(self.mdl_tex)))
+            self.canimport.config(text='')
+            self.draw()
+            self.say('%s. Drag to turn, wheel to zoom, middle-drag or Shift+drag to move, double-click to centre on a '
+                     'part, click a part to select its texture.' % name)
+        self.work('Opening the level %s...' % name, job, done)
+
+    def leave_level(self):
+        if self.level:
+            self.level, self.level_light, self.level_pan = None, None, None
+            self.mdl, self.mdl_tex, self.drawn = None, {}, None
 
     def draw(self, fast=False):
         """Draw the image to fit the preview area (on a checkerboard, so see-through parts show); returns the scale."""
@@ -1416,6 +1721,9 @@ class App:
         model = self.model.get()
         idx = self.be.model_index() or {}
         names = idx.get(model)
+        if self.level:   # every texture the level's models use
+            model = self.level
+            names = sorted({t for m in self.mdl.meshes for t in m.textures if os.path.exists(self.be.path(t + '.bntx.zs'))})
         if not names or self.busy:
             return
         folder = filedialog.askdirectory(parent=self.root, title='Folder for the %d textures of %s' % (len(names), model),

@@ -181,23 +181,31 @@ def format_name(t):
 def decode_mip0(src, max_size=None):
     """The texture and its full-size image (mip 0) as a Pillow RGBA image. With max_size, the first mip level no bigger
     than that instead (for previews)."""
-    from PIL import Image
     romfs = game_romfs(find_romfs(src))
     with tempfile.TemporaryDirectory() as tmp:
         d, _ = unzs(src, romfs, tmp)
-        t = Texture(d)
-        level = 0
-        while max_size and level + 1 < t.mips and max(t.mip_dims(level)[:2]) > max_size:
-            level += 1
-        w, h, wb, hb = t.mip_dims(level)
-        blocks = read_mip_blocks(t, level)
-        if t.kind in ASTC_BLOCKS:
-            bp, rp = os.path.join(tmp, 'b.bin'), os.path.join(tmp, 'p.rgba')
-            open(bp, 'wb').write(blocks)
-            run('decode-astc', bp, rp, w, h, t.bw, t.bh, 'srgb' if t.srgb else 'linear')
-            img = Image.frombytes('RGBA', (w, h), open(rp, 'rb').read())
-        else:
-            img = bc_image(t.kind, w, h, snorm_flip(t, blocks), t.snorm)   # BC4/BC5 SNORM shown shifted by 128
+        return decode_data(d, max_size, tmp)
+
+
+def decode_data(d, max_size=None, tmp=None):
+    """decode_mip0 for an already unpacked .bntx (bytes): (Texture, Pillow RGBA image)."""
+    from PIL import Image
+    if tmp is None:
+        with tempfile.TemporaryDirectory() as tmp:
+            return decode_data(d, max_size, tmp)
+    t = Texture(d)
+    level = 0
+    while max_size and level + 1 < t.mips and max(t.mip_dims(level)[:2]) > max_size:
+        level += 1
+    w, h, wb, hb = t.mip_dims(level)
+    blocks = read_mip_blocks(t, level)
+    if t.kind in ASTC_BLOCKS:
+        bp, rp = os.path.join(tmp, 'b.bin'), os.path.join(tmp, 'p.rgba')
+        open(bp, 'wb').write(blocks)
+        run('decode-astc', bp, rp, w, h, t.bw, t.bh, 'srgb' if t.srgb else 'linear')
+        img = Image.frombytes('RGBA', (w, h), open(rp, 'rb').read())
+    else:
+        img = bc_image(t.kind, w, h, snorm_flip(t, blocks), t.snorm)   # BC4/BC5 SNORM shown shifted by 128
     return t, img
 
 

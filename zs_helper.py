@@ -2,6 +2,7 @@
 # The texture tool's zstd step (needs Python 3.14+ for compression.zstd), with the game's dictionaries (Pack/ZsDic.pack.zs):
 #   zs_helper.py d <romfs> <in.zs> <out.bin>          decompress; prints the index of the dictionary used (-1: none)
 #   zs_helper.py c <romfs> <in.bin> <out.zs> <dict>   compress with that dictionary index (-1: none)
+#   zs_helper.py D <romfs> <list.txt> <unused>        decompress many: each line of list.txt is <in.zs>TAB<out.bin>
 import os, struct, sys
 from compression import zstd
 
@@ -15,6 +16,17 @@ def sarc_files(data):
 
 mode, romfs, src, dst = sys.argv[1:5]
 dicts = [zstd.ZstdDict(d) for d in sarc_files(zstd.decompress(open(os.path.join(romfs, 'Pack', 'ZsDic.pack.zs'), 'rb').read()))]
+if mode == 'D':   # many files in one run (the Levels tab loads hundreds of models)
+    by_id = {d.dict_id: d for d in dicts}
+    for line in open(src, encoding='utf-8').read().splitlines():
+        a, _, b = line.partition(chr(9))
+        try:
+            raw = open(a, 'rb').read()
+            d = by_id.get(zstd.get_frame_info(raw).dictionary_id)
+            open(b, 'wb').write(zstd.decompress(raw, zstd_dict=d) if d else zstd.decompress(raw))
+        except (OSError, zstd.ZstdError) as e:
+            print('%s: %s' % (a, e), file=sys.stderr)
+    sys.exit(0)
 raw = open(src, 'rb').read()
 if mode == 'd':
     # A frame made without a dictionary also decodes with one, so try none first: such files (the resource size table, read

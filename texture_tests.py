@@ -5,7 +5,7 @@
 
 Checks: for one texture of each format, export -> import unchanged -> export again stays close (PSNR floor per format),
 alpha survives, and DDS export -> DDS import gives identical blocks; BC2/BC6H are refused; mods.ini is read like the
-game; a few models load and draw. Needs texconv.exe (TEXCONV_DIR or next to texture_tool.py) and Python 3.14+ for zstd.
+game; a few models load and draw; a small level is put together from its layout and drawn. Needs texconv.exe (TEXCONV_DIR or next to texture_tool.py) and Python 3.14+ for zstd.
 Exit code 0 when everything passes.
 """
 import math
@@ -135,12 +135,47 @@ def models():
             name, len(m.meshes), sum(len(x.tris) for x in m.meshes), drawn))
 
 
+def levels(work):
+    """level_index.py reads a small arena's layout and finds its models; level_view puts them in place and draws them."""
+    import json
+    import subprocess
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        return
+    import bfres_model
+    import level_view
+    out = os.path.join(work, 'levels.json')
+    r = subprocess.run(tt.PY_ZSTD + ['-I', os.path.join(HERE, 'level_index.py'), ROMFS, out, 'DinolfosStage'],
+                       capture_output=True, text=True)
+    if r.returncode or not os.path.exists(out):
+        check(False, 'level_index.py: %s' % (r.stderr or r.stdout).strip()[-300:])
+        return
+    rows = json.load(open(out, encoding='utf-8'))['levels'].get('DreamWorld/DinolfosStage', [])
+    names = sorted({x[1] for x in rows if x[1]})
+    check(len(rows) > 10 and len(names) >= 3, 'DinolfosStage layout: %d placed, %d models' % (len(rows), len(names)))
+    models = {}
+    for n in names:
+        with tempfile.TemporaryDirectory() as tmp:
+            data, _ = tt.unzs(os.path.join(ROMFS, 'Model', n + '.bfres.zs'), ROMFS, tmp)
+        models[n] = bfres_model.parse(data, n)
+    lv = level_view.build('DinolfosStage', rows, models.get, level_view.is_far)
+    img, bufs = bfres_model.render(lv, {}, (160, 160), frame=(lv.centre, lv.radius), pick=True)
+    drawn = int((bufs[3] >= 0).sum())
+    owners = {rows[int(o)][0] for o in numpy.unique(bufs[3]) if o >= 0}
+    check(drawn > 1000 and len(owners) >= 2, 'DinolfosStage drawn: %d pixels, %d actors under them' % (drawn, len(owners)))
+    light = level_view.light(lv, 100)
+    check(0 < level_view.stats(light)[1] < level_view.stats(lv)[1], 'light copy: %d of %d triangles' % (
+        level_view.stats(light)[1], level_view.stats(lv)[1]))
+
+
 def main():
     work = tempfile.mkdtemp(prefix='oot-texture-tests-')
     try:
         textures(work)
         mods_ini(work)
         models()
+        levels(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print('\n%d failed' % len(failures) if failures else '\nall passed')

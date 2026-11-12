@@ -12,6 +12,7 @@
 - **See it on the model.** **View: On model** draws the texture (or your mod's copy) on the character or object that uses it. Drag to turn it, scroll to zoom.
 - **Paint right on the model:** a brush paints into the texture where you touch the model, keeping its transparency. Then import it into a mod.
 - **Models tab:** browse every model and click any part to jump to its texture.
+- **Levels tab:** see a whole dungeon, town or field put together from the game's layout files. Click any part to find its texture, and see every place that texture is used, in gold.
 - **Recolour** with hue, saturation and brightness sliders, watching the result on the model, or **edit in your paint program** and see each save on the model straight away.
 
 ![Pink hair on adult Link in the model view](docs/screenshot-model.png)
@@ -152,6 +153,17 @@ If your mod includes an ASTC texture, also share the `~Size table (made by the t
 Paint lands in the texture at the spot under the brush, so anything that shares that part of the texture changes too. On hair, for example, one stroke can show on several strands.
 
 ![Painting on adult Link's hair](docs/screenshot-paint.png)
+
+### Look at a whole level
+
+1. Open the **Levels** tab and pick a level, for example `KakarikoVillage/KakarikoVillage_Child`. The first time, the tool reads every level's layout (about 40 seconds) and then the level's textures (up to a minute); after that a level opens in a few seconds.
+2. **Drag** turns, the **wheel** zooms, **middle-drag** or **Shift+drag** moves, and **double-click** centres on a part.
+3. **Click** a part: its texture is selected, and every place the level uses it turns gold. Export, import, recolour or paint it as usual; the level shows your change.
+4. **Show far scenery** adds the distant mountains and sky around outdoor levels.
+
+Ground stored as terrain ("taskmesh") isn't drawn yet, so fields and some floors show gaps.
+
+![Kakariko Village in the Levels tab, with the stairs texture shown in gold](docs/screenshot-level.png)
 
 ### Texture name tips
 
@@ -333,6 +345,10 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 - It draws the model with a small software renderer in numpy (a z-buffer, with cut-outs for materials like hair and fur) at a fraction of a second per frame. Skinned meshes are drawn in their rest pose.
 - Numbered textures (`…_Alb.0` to `…_Alb.13`) are variants the game swaps into the `.0` slot, so any of them shows in that slot.
 
+**The Levels tab:**
+- `level_index.py` (Python 3.14+) reads each level layout (`Banc\<area>\<level>_Static/_Dynamic.bcett.byml.zs`, BYML files listing every placed object with its position, rotation and scale). For each object it opens the actor pack (`Pack\Actor\<name>.pack.zs`, a SARC archive) and follows `ActorParam` to `ModelInfo` to find the model. The list is cached in `%LOCALAPPDATA%\oot-texture-gui\level_index.json`.
+- `level_view.py` moves each model into place and merges parts that share a material, keeping which object each triangle came from so clicks can name it. While you move the view it draws a coarse copy (vertices snapped to a grid), then the full level when you stop.
+
 | File | Purpose |
 | --- | --- |
 | `Texture Tool.cmd` | Double-click launcher |
@@ -341,6 +357,9 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 | `zs_helper.py` | zstd with the game's dictionaries |
 | `bfres_model.py` | Reads models and draws them for the model view |
 | `model_index.py` | Lists which models use which textures (Python 3.14+) |
+| `level_index.py` | Lists each level's placed objects and their models (Python 3.14+) |
+| `level_view.py` | Puts a level together for the Levels tab |
+| `byml.py`, `sarc.py` | Read BYML layout files and SARC packs |
 | `texture_tests.py` | Regression checks (runs in a temporary folder): `py -3.12 texture_tests.py` |
 | `texconv.cpp`, `build-texconv.cmd` | The codec helper (ASTC decode; BC1, BC3, BC4, BC5, BC7 encode) and its build script |
 | `textures/` | The `astc2bc7` library that `texconv` links (ASTC decode, BC7 encode) |

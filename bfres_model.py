@@ -216,26 +216,31 @@ def view_matrix(yaw, pitch):
 
 
 def render(model, textures, size=(512, 512), yaw=0.6, pitch=-0.25, highlight=None, zoom=1.0, bg=(46, 50, 56),
-           pick=False, dim_others=True):
+           pick=False, dim_others=True, frame=None, tint=None):
     """Draw the model. textures: {texture name: RGBA numpy array (h, w, 4) uint8}. Each mesh uses the highlighted
     texture if it lists it, else its first _Alb texture, else grey. Meshes without the highlighted texture are dimmed
     when highlight is given (and dim_others). Returns an RGB numpy array (h, w, 3); with pick, also (mesh, u, v)
     per-pixel arrays (h, w): the mesh index (-1: background) and the texture coordinates there, for picking and
-    painting."""
+    painting. Meshes with an .owner array (one number per triangle, as level_view makes) add a fourth buffer: the
+    owner under each pixel. frame: (centre, radius) to look at instead of fitting the model (the Levels tab).
+    tint: an (r, g, b) colour mixed into the highlighted meshes, so they stand out in a big scene."""
     W, H = size
     meshes = [m for m in model.meshes if len(m.tris)]
     if not meshes:
         empty_img = np.full((H, W, 3), bg, np.uint8)
         return (empty_img, (np.full((H, W), -1, np.int32), np.zeros((H, W), np.float32), np.zeros((H, W), np.float32))) if pick else empty_img
     # frame the meshes that use the highlighted texture (the whole model when none do)
-    framed = [m for m in meshes if highlight in m.textures] or meshes
-    allpos = np.concatenate([m.pos for m in framed])
-    lo, hi = allpos.min(0), allpos.max(0)
-    if framed is not meshes:   # a little of the surroundings too
-        pad = (hi - lo).max() * 0.35
-        lo, hi = lo - pad, hi + pad
-    centre = (lo + hi) / 2
-    radius = float(np.linalg.norm(hi - lo)) / 2 or 1.0
+    if frame is not None:
+        centre, radius = np.asarray(frame[0], np.float32), float(frame[1]) or 1.0
+    else:
+        framed = [m for m in meshes if highlight in m.textures] or meshes
+        allpos = np.concatenate([m.pos for m in framed])
+        lo, hi = allpos.min(0), allpos.max(0)
+        if framed is not meshes:   # a little of the surroundings too
+            pad = (hi - lo).max() * 0.35
+            lo, hi = lo - pad, hi + pad
+        centre = (lo + hi) / 2
+        radius = float(np.linalg.norm(hi - lo)) / 2 or 1.0
     R = view_matrix(yaw, pitch)
     scale = min(W, H) / (2.1 * radius) * zoom
     light = np.array([0.35, 0.55, 0.75], np.float32)
@@ -243,6 +248,8 @@ def render(model, textures, size=(512, 512), yaw=0.6, pitch=-0.25, highlight=Non
 
     zbuf = np.full(W * H, np.inf, np.float32)
     bufs = (np.full(W * H, -1, np.int32), np.zeros(W * H, np.float32), np.zeros(W * H, np.float32)) if pick else None
+    if pick and any(getattr(m, 'owner', None) is not None for m in meshes):
+        bufs += (np.full(W * H, -1, np.int32),)
     colour = np.zeros((W * H, 3), np.float32)
     for m in meshes:
         tex_name = highlight if highlight in m.textures else next((t for t in m.textures if t.endswith('_Alb')), None)
@@ -250,6 +257,10 @@ def render(model, textures, size=(512, 512), yaw=0.6, pitch=-0.25, highlight=Non
         if tex_name is None:
             continue   # no colour texture (clear eye covers, shadow casters): not drawn
         dim = dim_others and highlight is not None and highlight not in m.textures
+        if tint is not None and highlight is not None and not dim:
+            base = tex if tex is not None else np.full((1, 1, 4), 170, np.uint8)
+            tex = base.copy()
+            tex[..., :3] = (base[..., :3] * 0.55 + np.asarray(tint, np.float32) * 0.45).astype(np.uint8)
         p = (m.pos - centre) @ R.T
         sx = p[:, 0] * scale + W / 2
         sy = -p[:, 1] * scale + H / 2
@@ -379,3 +390,5 @@ def _fill(ids, k, x, y, z, x0, y0, m, t, tex, dim, shade, W, H, zbuf, colour, vs
         bufs[0][pix] = mesh_no
         bufs[1][pix] = u
         bufs[2][pix] = v
+        if len(bufs) > 3 and getattr(m, 'owner', None) is not None:
+            bufs[3][pix] = m.owner[tri]
