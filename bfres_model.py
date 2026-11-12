@@ -215,14 +215,18 @@ def view_matrix(yaw, pitch):
     return rx @ ry
 
 
-def render(model, textures, size=(512, 512), yaw=0.6, pitch=-0.25, highlight=None, zoom=1.0, bg=(46, 50, 56)):
+def render(model, textures, size=(512, 512), yaw=0.6, pitch=-0.25, highlight=None, zoom=1.0, bg=(46, 50, 56),
+           pick=False, dim_others=True):
     """Draw the model. textures: {texture name: RGBA numpy array (h, w, 4) uint8}. Each mesh uses the highlighted
     texture if it lists it, else its first _Alb texture, else grey. Meshes without the highlighted texture are dimmed
-    when highlight is given. Returns an RGB numpy array (h, w, 3)."""
+    when highlight is given (and dim_others). Returns an RGB numpy array (h, w, 3); with pick, also (mesh, u, v)
+    per-pixel arrays (h, w): the mesh index (-1: background) and the texture coordinates there, for picking and
+    painting."""
     W, H = size
     meshes = [m for m in model.meshes if len(m.tris)]
     if not meshes:
-        return np.full((H, W, 3), bg, np.uint8)
+        empty_img = np.full((H, W, 3), bg, np.uint8)
+        return (empty_img, (np.full((H, W), -1, np.int32), np.zeros((H, W), np.float32), np.zeros((H, W), np.float32))) if pick else empty_img
     # frame the meshes that use the highlighted texture (the whole model when none do)
     framed = [m for m in meshes if highlight in m.textures] or meshes
     allpos = np.concatenate([m.pos for m in framed])
@@ -238,13 +242,14 @@ def render(model, textures, size=(512, 512), yaw=0.6, pitch=-0.25, highlight=Non
     light /= np.linalg.norm(light)
 
     zbuf = np.full(W * H, np.inf, np.float32)
+    bufs = (np.full(W * H, -1, np.int32), np.zeros(W * H, np.float32), np.zeros(W * H, np.float32)) if pick else None
     colour = np.zeros((W * H, 3), np.float32)
     for m in meshes:
         tex_name = highlight if highlight in m.textures else next((t for t in m.textures if t.endswith('_Alb')), None)
         tex = textures.get(tex_name) if tex_name else None
         if tex_name is None:
             continue   # no colour texture (clear eye covers, shadow casters): not drawn
-        dim = highlight is not None and highlight not in m.textures
+        dim = dim_others and highlight is not None and highlight not in m.textures
         p = (m.pos - centre) @ R.T
         sx = p[:, 0] * scale + W / 2
         sy = -p[:, 1] * scale + H / 2
@@ -254,14 +259,17 @@ def render(model, textures, size=(512, 512), yaw=0.6, pitch=-0.25, highlight=Non
             n = m.nrm @ R.T
             n /= np.linalg.norm(n, axis=1, keepdims=True) + 1e-12
             vshade = (0.35 + 0.65 * np.abs(n @ light)).astype(np.float32)
-        _raster(m, sx, sy, sz, p, tex, dim, light, W, H, zbuf, colour, vshade)
+        _raster(m, sx, sy, sz, p, tex, dim, light, W, H, zbuf, colour, vshade, bufs, model.meshes.index(m))
     img = colour.reshape(H, W, 3)
     empty = np.isinf(zbuf).reshape(H, W)
     img[empty] = bg
-    return np.clip(img, 0, 255).astype(np.uint8)
+    out = np.clip(img, 0, 255).astype(np.uint8)
+    if pick:
+        return out, tuple(a.reshape(H, W) for a in bufs)
+    return out
 
 
-def _raster(m, sx, sy, sz, p, tex, dim, light, W, H, zbuf, colour, vshade=None):
+def _raster(m, sx, sy, sz, p, tex, dim, light, W, H, zbuf, colour, vshade=None, bufs=None, mesh_no=0):
     t = m.tris
     x, y, z = sx[t], sy[t], sz[t]                       # (n, 3)
     # face normals for shading (two-sided)
@@ -271,15 +279,31 @@ def _raster(m, sx, sy, sz, p, tex, dim, light, W, H, zbuf, colour, vshade=None):
     shade = 0.35 + 0.65 * np.abs(fn @ light)
     x0, x1 = np.floor(x.min(1)).astype(np.int64), np.ceil(x.max(1)).astype(np.int64)
     y0, y1 = np.floor(y.min(1)).astype(np.int64), np.ceil(y.max(1)).astype(np.int64)
-    keep = (x1 >= 0) & (y1 >= 0) & (x0 < W) & (y0 < H)
-    span = np.maximum(x1 - x0, y1 - y0) + 1
-    for k in (2, 4, 8, 16, 32, 64, 128, 256, 512, 2048):
-        sel = np.nonzero(keep & (span <= k) & (span > k // 2 if k > 2 else True))[0]
-        if not len(sel):
+    # clip boxes to the screen, then group triangles by box width and height (steps of about 1.4x, so thin
+    # triangles like hair strands are not tested against big square boxes)
+    x0, y0 = np.maximum(x0, 0), np.maximum(y0, 0)
+    x1, y1 = np.minimum(x1, W - 1), np.minimum(y1, H - 1)
+    keep = (x1 >= x0) & (y1 >= y0)
+    bw, bh = x1 - x0 + 1, y1 - y0 + 1
+    lw = np.minimum(np.searchsorted(STEPS, bw), len(STEPS) - 1)
+    lh = np.minimum(np.searchsorted(STEPS, bh), len(STEPS) - 1)
+    key = np.where(keep, lw * 64 + lh, -1)
+    order = np.argsort(key, kind='stable')
+    key_sorted = key[order]
+    starts = np.flatnonzero(np.r_[True, key_sorted[1:] != key_sorted[:-1]])
+    ends = np.r_[starts[1:], len(order)]
+    for a, b in zip(starts, ends):
+        kk = key_sorted[a]
+        if kk < 0:
             continue
-        for chunk in range(0, len(sel), max(1, 400000 // (k * k))):
-            ids = sel[chunk:chunk + max(1, 400000 // (k * k))]
-            _fill(ids, k, x, y, z, x0, y0, m, t, tex, dim, shade, W, H, zbuf, colour, vshade)
+        kx, ky = int(STEPS[kk // 64]), int(STEPS[kk % 64])
+        per = max(1, 300000 // (kx * ky))
+        for c in range(a, b, per):
+            ids = order[c:min(b, c + per)]
+            _fill(ids, (kx, ky), x, y, z, x0, y0, m, t, tex, dim, shade, W, H, zbuf, colour, vshade, bufs, mesh_no)
+
+
+STEPS = np.unique(np.round(1.4 ** np.arange(0, 26)).astype(np.int64))   # 1, 2, 3, 4, 5, 8, 11, 15, 21, 29, 40, ...
 
 
 def _cutout(material):
@@ -287,56 +311,71 @@ def _cutout(material):
     return 'alphamask' in m or 'alpha' in m or 'hair' in m or 'fur' in m or 'eyelash' in m or 'leaf' in m or 'grass' in m
 
 
-def _fill(ids, k, x, y, z, x0, y0, m, t, tex, dim, shade, W, H, zbuf, colour, vshade=None):
-    gx, gy = np.meshgrid(np.arange(k), np.arange(k))
-    px = (x0[ids, None] + gx.reshape(1, -1)) + 0.5        # (n, k*k) pixel centres in each triangle's box
-    py = (y0[ids, None] + gy.reshape(1, -1)) + 0.5
-    ax, ay, bx, by, cx, cy = x[ids, 0, None], y[ids, 0, None], x[ids, 1, None], y[ids, 1, None], x[ids, 2, None], y[ids, 2, None]
+def _fill(ids, k, x, y, z, x0, y0, m, t, tex, dim, shade, W, H, zbuf, colour, vshade=None, bufs=None, mesh_no=0):
+    """Fill the triangles ids (boxes up to k = (kx, ky) pixels). bufs: optional (mesh, u, v) per-pixel buffers for picking and
+    painting. Hidden fragments are dropped before the texture is read; only the nearest per pixel is shaded."""
+    f32 = np.float32
+    kx, ky = k
+    gx, gy = np.meshgrid(np.arange(kx, dtype=f32), np.arange(ky, dtype=f32))
+    px = (x0[ids, None].astype(f32) + gx.reshape(1, -1)) + f32(0.5)       # (n, k*k) pixel centres
+    py = (y0[ids, None].astype(f32) + gy.reshape(1, -1)) + f32(0.5)
+    xs, ys = x[ids].astype(f32), y[ids].astype(f32)
+    ax, ay, bx, by, cx, cy = xs[:, 0, None], ys[:, 0, None], xs[:, 1, None], ys[:, 1, None], xs[:, 2, None], ys[:, 2, None]
     area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
     ok_area = np.abs(area) > 1e-9
-    area = np.where(ok_area, area, 1.0)
-    w0 = ((bx - px) * (cy - py) - (by - py) * (cx - px)) / area
-    w1 = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) / area
+    inv = np.where(ok_area, 1.0 / np.where(ok_area, area, 1.0), 0.0).astype(f32)
+    w0 = ((bx - px) * (cy - py) - (by - py) * (cx - px)) * inv
+    w1 = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) * inv
     w2 = 1.0 - w0 - w1
     inside = (w0 >= -1e-4) & (w1 >= -1e-4) & (w2 >= -1e-4) & ok_area & (px >= 0) & (px < W) & (py >= 0) & (py < H)
     ti, pi = np.nonzero(inside)
     if not len(ti):
         return
     tri = ids[ti]
-    b0, b1, b2 = w0[ti, pi], w1[ti, pi], w2[ti, pi]
-    pix = (py[ti, pi].astype(np.int64)) * W + px[ti, pi].astype(np.int64)
-    depth = b0 * z[tri, 0] + b1 * z[tri, 1] + b2 * z[tri, 2]
-    if tex is not None:
-        uv = m.uv[t[tri]]                                   # (n, 3, 2)
-        u = b0 * uv[:, 0, 0] + b1 * uv[:, 1, 0] + b2 * uv[:, 2, 0]
-        v = b0 * uv[:, 0, 1] + b1 * uv[:, 1, 1] + b2 * uv[:, 2, 1]
+    b0, b1 = w0[ti, pi], w1[ti, pi]
+    b2 = 1.0 - b0 - b1
+    pix = py[ti, pi].astype(np.int64) * W + px[ti, pi].astype(np.int64)
+    zt = z[tri].astype(f32)
+    depth = b0 * zt[:, 0] + b1 * zt[:, 1] + b2 * zt[:, 2]
+    # early depth test against what earlier batches drew
+    keep = depth < zbuf[pix]
+    if not keep.all():
+        tri, pix, depth, b0, b1, b2 = tri[keep], pix[keep], depth[keep], b0[keep], b1[keep], b2[keep]
+    if not len(tri):
+        return
+    tv = t[tri]
+    uv = m.uv
+    u = b0 * uv[tv[:, 0], 0] + b1 * uv[tv[:, 1], 0] + b2 * uv[tv[:, 2], 0]
+    v = b0 * uv[tv[:, 0], 1] + b1 * uv[tv[:, 1], 1] + b2 * uv[tv[:, 2], 1]
+    if tex is not None and _cutout(m.material):   # cut-outs: alpha decides before the depth contest
         th, tw = tex.shape[:2]
-        tx = (np.mod(u, 1.0) * tw).astype(np.int64) % tw
-        ty = (np.mod(v, 1.0) * th).astype(np.int64) % th
-        texel = tex[ty, tx]
-        # alpha is a cut-out only for cut-out materials (others keep masks or other data in it)
-        solid = texel[:, 3] >= 128 if _cutout(m.material) else np.ones(len(tri), bool)
-        rgb = texel[:, :3].astype(np.float32)
+        solid = tex[(np.mod(v, 1.0) * th).astype(np.int64) % th, (np.mod(u, 1.0) * tw).astype(np.int64) % tw, 3] >= 128
+        if not solid.all():
+            tri, pix, depth, b0, b1, b2, u, v = (a[solid] for a in (tri, pix, depth, b0, b1, b2, u, v))
+            tv = t[tri]
+    if not len(tri):
+        return
+    # nearest fragment per pixel: farthest first, so the nearest is written last
+    order = np.argsort(-depth, kind='stable')
+    tri, pix, depth, b0, b1, b2, u, v, tv = (a[order] for a in (tri, pix, depth, b0, b1, b2, u, v, tv))
+    win = np.zeros(W * H, np.int64)
+    win[pix] = np.arange(len(pix))
+    sel = np.unique(win[pix])
+    tri, pix, depth, b0, b1, b2, u, v, tv = (a[sel] for a in (tri, pix, depth, b0, b1, b2, u, v, tv))
+    if tex is not None:
+        th, tw = tex.shape[:2]
+        rgb = tex[(np.mod(v, 1.0) * th).astype(np.int64) % th, (np.mod(u, 1.0) * tw).astype(np.int64) % tw, :3].astype(f32)
     else:
-        solid = np.ones(len(tri), bool)
-        rgb = np.full((len(tri), 3), 170.0, np.float32)
-    if not solid.all():
-        tri, pix, depth, rgb = tri[solid], pix[solid], depth[solid], rgb[solid]
-        b0, b1, b2 = b0[solid], b1[solid], b2[solid]
+        rgb = np.full((len(tri), 3), 170.0, f32)
     if dim:
-        grey = rgb.mean(1, keepdims=True)
-        rgb = grey * 0.55 + 40
+        rgb = rgb.mean(1, keepdims=True) * 0.55 + 40
     if vshade is not None:
-        tv = t[tri]
-        rgb *= (b0 * vshade[tv[:, 0]] + b1 * vshade[tv[:, 1]] + b2 * vshade[tv[:, 2]])[:, None]
+        rgb = rgb * (b0 * vshade[tv[:, 0]] + b1 * vshade[tv[:, 1]] + b2 * vshade[tv[:, 2]])[:, None]
     else:
-        rgb *= shade[tri, None]
-    # nearest fragment per pixel, then against the z-buffer
-    order = np.lexsort((depth, pix))
-    pix, depth, rgb = pix[order], depth[order], rgb[order]
-    first = np.ones(len(pix), bool)
-    first[1:] = pix[1:] != pix[:-1]
-    pix, depth, rgb = pix[first], depth[first], rgb[first]
-    closer = depth < zbuf[pix]
-    zbuf[pix[closer]] = depth[closer]
-    colour[pix[closer]] = rgb[closer]
+        rgb = rgb * shade[tri, None]
+    zbuf[pix] = depth
+    colour[pix] = rgb
+    if bufs is not None:
+        bufs[0][pix] = mesh_no
+        bufs[1][pix] = u
+        bufs[2][pix] = v

@@ -10,6 +10,8 @@
 - **Import** your edited PNG or DDS into a mod folder. Every mip level is rebuilt from your image. BC1, BC3, BC4, BC5, BC7 and ASTC textures can be imported: about 97% of the game's textures.
 - **See your mod's version** right away. Textures your mods replace are marked ◆, and **Show** flips between the original and each mod's copy.
 - **See it on the model.** **View: On model** draws the texture (or your mod's copy) on the character or object that uses it. Drag to turn it, scroll to zoom.
+- **Paint right on the model:** a brush paints into the texture where you touch the model, keeping its transparency. Then import it into a mod.
+- **Models tab:** browse every model and click any part to jump to its texture.
 - **Recolour** with hue, saturation and brightness sliders, watching the result on the model, or **edit in your paint program** and see each save on the model straight away.
 
 ![Pink hair on adult Link in the model view](docs/screenshot-model.png)
@@ -134,6 +136,17 @@ If your mod includes an ASTC texture, also share the `~Size table (made by the t
 - The model view shows your whole mod: every part of the model uses the copy the game would load.
 
 ![Recolouring adult Link's hair, previewed on the model](docs/screenshot-recolour.png)
+
+### Paint on the model
+
+1. Select a texture, or open a model in the **Models** tab and click the part you want. Then use **View: On model**.
+2. Tick **Paint on model**, then pick a colour with the colour button. Right-click the model to pick up a colour from it.
+3. **Left-drag** paints; **right-drag** turns the model; the **wheel** zooms; **Ctrl+wheel** (or the slider) sets the brush size.
+4. **Undo** steps back. **Import painted...** puts the painted texture in a mod.
+
+Paint lands in the texture at the spot under the brush, so anything that shares that part of the texture changes too. On hair, for example, one stroke can show on several strands.
+
+![Painting on adult Link's hair](docs/screenshot-paint.png)
 
 ### Texture name tips
 

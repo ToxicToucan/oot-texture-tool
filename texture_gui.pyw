@@ -470,14 +470,36 @@ class App:
 
         body = ttk.PanedWindow(root, orient='horizontal')
         body.pack(fill='both', expand=True, padx=8, pady=8)
-        left = ttk.Frame(body)
+        self.tabs = ttk.Notebook(body)
+        left = ttk.Frame(self.tabs)
         self.lb = tk.Listbox(left, activestyle='none', exportselection=False, font=('Segoe UI', 9))
         sb = ttk.Scrollbar(left, orient='vertical', command=self.lb.yview)
         self.lb.config(yscrollcommand=sb.set)
         self.lb.pack(side='left', fill='both', expand=True)
         sb.pack(side='right', fill='y')
         self.lb.bind('<<ListboxSelect>>', lambda _: self.select())
-        body.add(left, weight=1)
+        self.tabs.add(left, text='Textures')
+        mtab = ttk.Frame(self.tabs)
+        mtop = ttk.Frame(mtab)
+        mtop.pack(fill='x', pady=(4, 4))
+        ttk.Label(mtop, text='Find:').pack(side='left')
+        self.mq = tk.StringVar()
+        self.mq.trace_add('write', lambda *_: self.fill_models())
+        ttk.Entry(mtop, textvariable=self.mq, width=20).pack(side='left', padx=4, fill='x', expand=True)
+        self.mcount = ttk.Label(mtop, text='')
+        self.mcount.pack(side='left')
+        mlist = ttk.Frame(mtab)
+        mlist.pack(fill='both', expand=True)
+        self.mlb = tk.Listbox(mlist, activestyle='none', exportselection=False, font=('Segoe UI', 9))
+        msb = ttk.Scrollbar(mlist, orient='vertical', command=self.mlb.yview)
+        self.mlb.config(yscrollcommand=msb.set)
+        self.mlb.pack(side='left', fill='both', expand=True)
+        msb.pack(side='right', fill='y')
+        self.mlb.bind('<<ListboxSelect>>', lambda _: self.models_tab_select())
+        self.tabs.add(mtab, text='Models')
+        self.tabs.bind('<<NotebookTabChanged>>', lambda _: self.fill_models() if self.tabs.index('current') == 1 else None)
+        self.models_all = []
+        body.add(self.tabs, weight=1)
 
         right = ttk.Frame(body, padding=(8, 0, 0, 0))
         self.title = ttk.Label(right, text='Pick a texture on the left.', font=('Segoe UI', 11, 'bold'))
@@ -505,6 +527,20 @@ class App:
         self.modelcb.bind('<<ComboboxSelected>>', lambda _: self.pick_model())
         self.bmexp = ttk.Button(mrow, text='Export its textures...', command=self.export_model_textures, state='disabled')
         self.bmexp.pack(side='left', padx=(6, 0))
+        prow = ttk.Frame(right)
+        prow.pack(anchor='w', fill='x', pady=(0, 6))
+        self.painting = tk.BooleanVar(value=False)
+        ttk.Checkbutton(prow, text='Paint on model', variable=self.painting, command=self.toggle_paint).pack(side='left')
+        self.brush_rgb = (220, 60, 140)
+        self.colour_swatch = tk.Button(prow, width=3, background='#dc3c8c', relief='groove', command=self.pick_colour)
+        self.colour_swatch.pack(side='left', padx=(8, 4))
+        ttk.Label(prow, text='Brush').pack(side='left')
+        self.brush = tk.IntVar(value=8)
+        ttk.Scale(prow, from_=1, to=80, variable=self.brush, length=110,
+                  command=lambda v: self.brush.set(int(float(v)))).pack(side='left', padx=4)
+        ttk.Button(prow, text='Undo', command=self.undo_paint).pack(side='left', padx=(4, 0))
+        ttk.Button(prow, text='Import painted...', command=self.import_painted).pack(side='left', padx=(6, 0))
+        self.undo, self.browse, self.pickbuf, self.cursor_xy, self.painted = [], False, None, None, False
         self.mdl, self.mdl_tex, self.yaw, self.pitch, self.zoom, self.drag = None, {}, 0.5, -0.2, 1.0, None
         self.override = None      # a recoloured or edited image shown instead of the texture (not imported yet)
         self.tzoom, self.tpan = 1.0, (0.0, 0.0)   # texture view zoom (wheel) and offset (drag)
@@ -532,6 +568,10 @@ class App:
         self.canvas.bind('<B1-Motion>', self.drag_move)
         self.canvas.bind('<ButtonRelease-1>', self.drag_end)
         self.canvas.bind('<MouseWheel>', self.wheel)
+        self.canvas.bind('<ButtonPress-3>', self.rotate_start)
+        self.canvas.bind('<B3-Motion>', self.rotate_move)
+        self.canvas.bind('<ButtonRelease-3>', self.rotate_end)
+        self.canvas.bind('<Motion>', self.hover)
         body.add(right, weight=2)
 
         self.status = ttk.Label(root, text='', relief='sunken', anchor='w', padding=(6, 2))
@@ -617,6 +657,7 @@ class App:
         sel = self.lb.curselection()
         if not sel:
             return
+        self.browse = False
         name = self.shown[sel[0]]
         self.versions = self.be.versions(name)
         # what the game shows: the winning mod's copy, or the game's own
@@ -771,7 +812,10 @@ class App:
                 self.draw()
                 return
             used = sum(1 for m in self.mdl.meshes if self.name and self.be.model_slot(self.name) in m.textures)
-            if all(m.name.lower().startswith('dummy') for m in self.mdl.meshes):
+            if self.browse or not self.name:
+                self.say('%s: %d meshes. Drag to turn, wheel to zoom, click a part to select its texture.'
+                         % (name, len(self.mdl.meshes)))
+            elif all(m.name.lower().startswith('dummy') for m in self.mdl.meshes):
                 self.say('%s is only a placeholder (a %d-triangle "dummy" mesh); in the game this texture is put on another '
                          'model. Try another model in the list.' % (name, sum(len(m.tris) for m in self.mdl.meshes)))
             else:
@@ -780,26 +824,58 @@ class App:
             self.draw()
         self.work('Loading the model %s...' % name, job, done)
 
+    # --- mouse on the preview: turn / zoom the model, pick a part (click), paint (Paint on); move / zoom the texture
     def drag_start(self, e):
         self.drag = (e.x, e.y, self.yaw, self.pitch, self.tpan)
+        self.moved = False
+        self.last_paint = None
+        if self.view.get() == 'model' and self.painting.get() and self.mdl:
+            self.undo.append(None if self.override is None else self.override.copy())
+            del self.undo[:-12]
+            self.paint_at(e.x, e.y)
 
     def drag_move(self, e):
-        if self.drag and self.view.get() == 'texture' and self.img is not None and self.tzoom > 1:
-            x, y, _, _, pan = self.drag
+        if not self.drag:
+            return
+        x, y, yaw, pitch, pan = self.drag
+        if abs(e.x - x) + abs(e.y - y) > 3:
+            self.moved = True
+        if self.view.get() == 'texture' and self.img is not None and self.tzoom > 1:
             s = self.draw_scale()
             self.tpan = (pan[0] - (e.x - x) / s, pan[1] - (e.y - y) / s)
-            self.draw()
+            self.schedule_draw()
             return
-        if self.drag and self.view.get() == 'model' and self.mdl:
-            x, y, yaw, pitch, _ = self.drag
+        if self.view.get() == 'model' and self.mdl:
+            if self.painting.get():
+                self.paint_at(e.x, e.y)
+                return
             self.yaw = yaw + (e.x - x) * 0.01
             self.pitch = max(-1.5, min(1.5, pitch + (e.y - y) * 0.01))
-            self.draw(fast=True)
+            self.schedule_draw(fast=True)
 
     def drag_end(self, e):
+        moved = getattr(self, 'moved', True)
         self.drag = None
-        if self.view.get() == 'model':
-            self.draw()
+        if self.view.get() == 'model' and self.mdl:
+            if self.painting.get():
+                self.schedule_draw()
+            elif not moved:
+                self.pick_at(e.x, e.y)
+            else:
+                self.schedule_draw()
+
+    def schedule_draw(self, fast=False):
+        """Draw once per screen update, however many mouse events arrive; a sharp draw follows a pause."""
+        self._want_fast = fast if getattr(self, '_draw_job', None) is None else (self._want_fast and fast)
+        if getattr(self, '_draw_job', None) is None:
+            def run():
+                self._draw_job = None
+                self.draw(fast=self._want_fast)
+            self._draw_job = self.root.after(1, run)
+        if fast:
+            if getattr(self, '_settle_job', None):
+                self.root.after_cancel(self._settle_job)
+            self._settle_job = self.root.after(300, lambda: (setattr(self, '_settle_job', None), self.draw()))
 
     def draw_scale(self):
         cw, ch = max(16, self.canvas.winfo_width() - 4), max(16, self.canvas.winfo_height() - 4)
@@ -812,18 +888,28 @@ class App:
             self.tzoom = max(1.0, min(32.0, self.tzoom * (1.25 if e.delta > 0 else 0.8)))
             if self.tzoom == 1.0:
                 self.tpan = (0.0, 0.0)
-            self.draw()
+            self.schedule_draw()
             self.say('Texture zoom %d%%%s' % (round(self.draw_scale() * 100), ' - drag to move' if self.tzoom > 1 else ''))
             return
         if self.view.get() == 'model' and self.mdl:
-            self.zoom = max(0.3, min(12.0, self.zoom * (1.15 if e.delta > 0 else 1 / 1.15)))
-            self.draw()
+            if self.painting.get() and e.state & 0x4:   # Ctrl+wheel: brush size
+                self.brush.set(max(1, min(80, self.brush.get() + (2 if e.delta > 0 else -2))))
+                return
+            self.zoom = max(0.3, min(30.0, self.zoom * (1.15 if e.delta > 0 else 1 / 1.15)))
+            self.schedule_draw(fast=True)
+
+    def focus_texture(self):
+        """The texture the model view shows highlighted (None when browsing a whole model)."""
+        if self.browse or not self.name:
+            return None
+        return self.be.model_slot(self.name)
 
     def draw_model(self, fast=False):
         import numpy as np
         from PIL import Image, ImageTk
         cw, ch = max(16, self.canvas.winfo_width() - 4), max(16, self.canvas.winfo_height() - 4)
         self.canvas.delete('all')
+        self.pickbuf = None
         if self.mdl is None or not self.mdl.meshes:
             msg = (self.model.get() or 'No model') if self.mdl is None else (
                 '%s keeps its meshes in a form this preview cannot read yet\n(terrain and some map pieces).\n'
@@ -832,20 +918,243 @@ class App:
             return 1
         import bfres_model
         tex = dict(self.mdl_tex)
-        hl = self.be.model_slot(self.name) if self.name else None
+        hl = self.focus_texture()
         if hl and self.img is not None:
-            small = (self.override or self.img).copy()
-            small.thumbnail((1024, 1024))
-            tex[hl] = np.asarray(small.convert('RGBA'))
-        # big windows draw at up to 900 pixels and are scaled up (dragging at half that)
-        k = max(1.0, max(cw, ch) / 900.0) * (2 if fast else 1)
-        out = bfres_model.render(self.mdl, tex, (int(cw / k), int(ch / k)), self.yaw, self.pitch, highlight=hl, zoom=self.zoom)
+            src = self.override or self.img
+            if fast and getattr(self, '_small_src', None) is src:
+                small = self._small
+            else:
+                small = src.copy()
+                small.thumbnail((1024, 1024))
+                small = np.asarray(small.convert('RGBA'))
+                self._small_src, self._small = src, small
+            tex[hl] = small
+        # draws at up to 900 pixels (450 while moving) and is scaled to the window
+        k = max(1.0, max(cw, ch) / (450.0 if fast else 900.0))
+        rw, rh = max(16, int(cw / k)), max(16, int(ch / k))
+        out, bufs = bfres_model.render(self.mdl, tex, (rw, rh), self.yaw, self.pitch, highlight=hl, zoom=self.zoom,
+                                       pick=True, dim_others=not self.painting.get())
+        self.pickbuf = (bufs, rw, rh, cw, ch)
         img = Image.fromarray(out)
-        if k > 1:
+        if (rw, rh) != (cw, ch):
             img = img.resize((cw, ch), Image.NEAREST if fast else Image.BILINEAR)
         self.photo = ImageTk.PhotoImage(img)
         self.canvas.create_image(self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2, image=self.photo)
+        if self.painting.get() and getattr(self, 'cursor_xy', None):
+            x, y = self.cursor_xy
+            r = self.brush.get()
+            self.canvas.create_oval(x - r, y - r, x + r, y + r, outline='#fff')
         return 1
+
+    def pick(self, x, y):
+        """(mesh, u, v, texels per screen pixel) under a point of the preview, or None."""
+        if not self.pickbuf:
+            return None
+        (mid, ub, vb), rw, rh, cw, ch = self.pickbuf
+        ox = (self.canvas.winfo_width() - cw) / 2
+        oy = (self.canvas.winfo_height() - ch) / 2
+        ix, iy = int((x - ox) * rw / cw), int((y - oy) * rh / ch)
+        if not (0 <= ix < rw and 0 <= iy < rh) or mid[iy, ix] < 0:
+            return None
+        i = int(mid[iy, ix])
+        # how far the texture moves across one screen pixel (for the brush size): the median over nearby pixels of
+        # the same mesh, leaving out jumps across UV seams
+        steps = []
+        for jx, jy in ((ix + 1, iy), (ix - 1, iy), (ix, iy + 1), (ix, iy - 1), (ix + 2, iy), (ix, iy + 2)):
+            if 0 <= jx < rw and 0 <= jy < rh and mid[jy, jx] == i:
+                d = max(abs(float(ub[jy, jx] - ub[iy, ix])), abs(float(vb[jy, jx] - vb[iy, ix])))
+                d /= max(abs(jx - ix), abs(jy - iy))
+                if 0 < d < 0.02:
+                    steps.append(d)
+        step = sorted(steps)[len(steps) // 2] if steps else 0.002
+        return i, float(ub[iy, ix]), float(vb[iy, ix]), step * rw / cw
+
+    def pick_at(self, x, y):
+        """Click on the model: select the texture of the part under the mouse (the reverse lookup)."""
+        hit = self.pick(x, y)
+        if hit is None:
+            return
+        mesh = self.mdl.meshes[hit[0]]
+        hl = self.focus_texture()
+        tex = hl if hl in mesh.textures else next((t for t in mesh.textures if t.endswith('_Alb')), None) or \
+            (mesh.textures[0] if mesh.textures else None)
+        listing = ', '.join(mesh.textures) or 'no textures'
+        if not tex:
+            self.say('%s (material %s): %s' % (mesh.name, mesh.material, listing))
+            return
+        self.say('%s (material %s) uses %s' % (mesh.name, mesh.material, listing))
+        if tex != hl:
+            self.select_texture(tex)
+
+    def select_texture(self, tex):
+        """Select a texture in the list (clearing the search if it hides it), keeping the model view."""
+        name = tex + '.bntx.zs'
+        if name not in self.names:
+            self.say('%s is not in the game\'s Tex folder' % tex)
+            return
+        self.browse = False
+        self.tabs.select(0)
+        if name not in self.shown:
+            self.only_mod.set(False)
+            self.q.set('')
+        i = self.shown.index(name)
+        self.lb.selection_clear(0, 'end')
+        self.lb.selection_set(i)
+        self.lb.see(i)
+        self.select()
+
+    def paint_at(self, x, y):
+        """Paint the brush colour into the selected texture where the mouse is on the model."""
+        from PIL import ImageDraw
+        self.cursor_xy = (x, y)
+        hl = self.focus_texture()
+        hit = self.pick(x, y)
+        if hit is None or not hl or self.img is None:
+            self.schedule_draw(fast=True)
+            return
+        i, u, v, step = hit
+        if hl not in self.mdl.meshes[i].textures:
+            self.say('Paint works on %s; that part uses %s.' % (hl, ', '.join(self.mdl.meshes[i].textures) or 'no texture'))
+            return
+        if self.override is None:
+            self.override = self.img.convert('RGBA').copy()
+        W, H = self.override.size
+        tx, ty = (u % 1.0) * W, (v % 1.0) * H
+        r = max(1.0, min(max(W, H) / 8.0, self.brush.get() * step * max(W, H)))
+        col = self.brush_rgb + (255,)
+        d = ImageDraw.Draw(self.override)
+        last = self.last_paint
+        if last and abs(last[0] - tx) < 8 * r + 4 and abs(last[1] - ty) < 8 * r + 4:   # same stroke: join the dabs
+            d.line((last[0], last[1], tx, ty), fill=col, width=int(2 * r))
+        d.ellipse((tx - r, ty - r, tx + r, ty + r), fill=col)
+        # paint changes colour only: the texture's transparency (cut-outs) stays as it was
+        if getattr(self, '_alpha_src', None) is not self.img:
+            self._alpha_src, self._alpha = self.img, self.img.convert('RGBA').getchannel('A')
+        self.override.putalpha(self._alpha)
+        self.last_paint = (tx, ty)
+        self.painted = True
+        self.schedule_draw(fast=True)
+
+    def toggle_paint(self):
+        if self.painting.get():
+            if self.view.get() != 'model' or not self.mdl or not self.focus_texture():
+                self.painting.set(False)
+                self.error('Paint on model', ToolError('Pick a texture (Textures list, or click a part of a model), '
+                                                       'then View: On model, then Paint.'))
+                return
+            if not self.orig or not self.orig['importable']:
+                self.say('Painting works, but this texture cannot be imported (%s); Save PNG keeps the result.'
+                         % (self.orig or {}).get('format', '?'))
+            self.say('Paint: left-drag paints %s; right-drag turns the model; wheel zooms; Ctrl+wheel brush size.'
+                     % self.focus_texture())
+        self.cursor_xy = None
+        self.draw()
+
+    def pick_colour(self):
+        from tkinter import colorchooser
+        c = colorchooser.askcolor(color='#%02x%02x%02x' % self.brush_rgb, parent=self.root, title='Brush colour')
+        if c and c[0]:
+            self.brush_rgb = tuple(int(v) for v in c[0])
+            self.colour_swatch.config(background=c[1])
+
+    def sample_colour(self, e):
+        """Right-click with Paint on: pick up the colour under the mouse (from the texture)."""
+        hit = self.pick(e.x, e.y)
+        if hit is None or not self.focus_texture() or self.focus_texture() not in self.mdl.meshes[hit[0]].textures:
+            return
+        src = self.override or self.img
+        W, H = src.size
+        r, g, b = src.convert('RGB').getpixel((int((hit[1] % 1.0) * W) % W, int((hit[2] % 1.0) * H) % H))
+        self.brush_rgb = (r, g, b)
+        self.colour_swatch.config(background='#%02x%02x%02x' % (r, g, b))
+
+    def undo_paint(self):
+        if not self.undo:
+            return
+        self.override = self.undo.pop()
+        self.draw()
+
+    def import_painted(self):
+        if self.override is None:
+            self.say('Nothing painted yet.')
+            return
+        self.import_(self.temp_png(self.override, 'paint'))
+
+    def rotate_start(self, e):
+        self.rdrag = (e.x, e.y, self.yaw, self.pitch)
+
+    def rotate_move(self, e):
+        if getattr(self, 'rdrag', None) and self.view.get() == 'model' and self.mdl:
+            x, y, yaw, pitch = self.rdrag
+            self.yaw = yaw + (e.x - x) * 0.01
+            self.pitch = max(-1.5, min(1.5, pitch + (e.y - y) * 0.01))
+            self.schedule_draw(fast=True)
+
+    def rotate_end(self, e):
+        if getattr(self, 'rdrag', None):
+            x, y, _, _ = self.rdrag
+            self.rdrag = None
+            if abs(e.x - x) + abs(e.y - y) <= 3 and self.painting.get():
+                self.sample_colour(e)
+            else:
+                self.schedule_draw()
+
+    def hover(self, e):
+        if self.view.get() == 'model' and self.painting.get():
+            self.cursor_xy = (e.x, e.y)
+            r = self.brush.get()
+            self.canvas.delete('brush')
+            self.canvas.create_oval(e.x - r, e.y - r, e.x + r, e.y + r, outline='#fff', tags='brush')
+
+    # --- the Models tab
+    def fill_models(self):
+        idx = self.be.model_index()
+        self.mlb.delete(0, 'end')
+        if idx is None:
+            self.models_all = []
+            self.mlb.insert('end', '(the model list is not built yet:', ' click here, or open View: On model)')
+            return
+        flat = getattr(self.be, '_flat', set())
+        words = self.mq.get().lower().split()
+        self.models_all = [m for m in sorted(idx, key=str.lower) if all(w in m.lower() for w in words)]
+        self.mlb.insert('end', *[m + ('   (terrain: no preview)' if m in flat else '') for m in self.models_all])
+        self.mcount.config(text='%d models' % len(self.models_all))
+
+    def models_tab_select(self):
+        sel = self.mlb.curselection()
+        if not sel:
+            return
+        if not self.models_all:
+            if self.busy:
+                return
+
+            def done(n, err):
+                if err:
+                    self.error('Model list not built', err)
+                else:
+                    self.fill_models()
+            self.work('Building the list of models and their textures (once, about 30 seconds)...', self.be.build_model_index, done)
+            return
+        self.open_model(self.models_all[sel[0]])
+
+    def open_model(self, name):
+        """Show a whole model (no texture highlighted); click a part to select its texture."""
+        try:
+            import numpy  # noqa: F401
+        except ImportError:
+            self.error('numpy missing', ToolError('The model view needs numpy:\n\n  py -3.12 -m pip install numpy'))
+            return
+        self.browse = True
+        self.painting.set(False)
+        self.view.set('model')
+        self.modelcb.config(values=[name], state='readonly')
+        self.bmexp.config(state='normal')
+        self.model.set(name)
+        self.title.config(text=name)
+        idx = self.be.model_index() or {}
+        self.details.config(text='%d textures. Click a part of the model to select its texture.' % len(idx.get(name, [])))
+        self.canimport.config(text='')
+        self.pick_model()
 
     def draw(self, fast=False):
         """Draw the image to fit the preview area (on a checkerboard, so see-through parts show); returns the scale."""
