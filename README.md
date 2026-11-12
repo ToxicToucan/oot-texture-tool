@@ -12,6 +12,7 @@
 - **See it on the model.** **View: On model** draws the texture (or your mod's copy) on the character or object that uses it. Drag to turn it, scroll to zoom.
 - **Paint right on the model:** a brush paints into the texture where you touch the model, keeping its transparency. Then import it into a mod.
 - **Models tab:** browse every model and click any part to jump to its texture.
+- **Export a model** as OBJ + MTL with PNG textures (your mods included) for Blender and other 3D programs.
 - **Levels tab:** see a whole dungeon, town or field put together from the game's layout files. Click any part to find its texture, and see every place that texture is used, in gold.
 - **Recolour** with hue, saturation and brightness sliders, watching the result on the model, or **edit in your paint program** and see each save on the model straight away.
 
@@ -140,6 +141,7 @@ If your mod includes an ASTC texture, also share the `~Size table (made by the t
 - **Export its textures...** (in the model view) saves every texture of the shown model as PNGs, for repainting a whole character.
 - **Import folder...** (top right) imports every PNG or DDS in a folder that is named like a texture into one mod, so you can repaint a whole character and bring it all back at once. Files with other names are listed and skipped.
 - The model view shows your whole mod: every part of the model uses the copy the game would load.
+- **Export model (OBJ)...** (in the model view, and **Export (OBJ)...** in the Models tab for the selected model) saves the model as OBJ + MTL with its colour textures as PNGs, for Blender and other 3D programs. Textures come from the copy the game would load, so your mods show. Meshes are in the model's rest pose; no skeleton or animation.
 
 ![Recolouring adult Link's hair, previewed on the model](docs/screenshot-recolour.png)
 
@@ -359,6 +361,7 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 | `model_index.py` | Lists which models use which textures (Python 3.14+) |
 | `level_index.py` | Lists each level's placed objects and their models (Python 3.14+) |
 | `level_view.py` | Puts a level together for the Levels tab |
+| `export_model.py` | Exports a model as OBJ + MTL + PNGs; also a command-line tool: `py -3.12 export_model.py <model> <folder>` |
 | `byml.py`, `sarc.py` | Read BYML layout files and SARC packs |
 | `texture_tests.py` | Regression checks (runs in a temporary folder): `py -3.12 texture_tests.py` |
 | `texconv.cpp`, `build-texconv.cmd` | The codec helper (ASTC decode; BC1, BC3, BC4, BC5, BC7 encode) and its build script |

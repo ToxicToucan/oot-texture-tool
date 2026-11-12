@@ -634,6 +634,7 @@ class App:
         ttk.Entry(mtop, textvariable=self.mq, width=20).pack(side='left', padx=4, fill='x', expand=True)
         self.mcount = ttk.Label(mtop, text='')
         self.mcount.pack(side='left')
+        ttk.Button(mtop, text='Export (OBJ)...', command=lambda: self.export_model_obj(self.selected_list_model())).pack(side='left', padx=(4, 0))
         mlist = ttk.Frame(mtab)
         mlist.pack(fill='both', expand=True)
         self.mlb = tk.Listbox(mlist, activestyle='none', exportselection=False, font=('Segoe UI', 9))
@@ -695,6 +696,8 @@ class App:
         self.modelcb.bind('<<ComboboxSelected>>', lambda _: self.pick_model())
         self.bmexp = ttk.Button(mrow, text='Export its textures...', command=self.export_model_textures, state='disabled')
         self.bmexp.pack(side='left', padx=(6, 0))
+        self.bobj = ttk.Button(mrow, text='Export model (OBJ)...', command=self.export_model_obj, state='disabled')
+        self.bobj.pack(side='left', padx=(6, 0))
         prow = ttk.Frame(right)
         prow.pack(anchor='w', fill='x', pady=(0, 6))
         self.painting = tk.BooleanVar(value=False)
@@ -925,7 +928,7 @@ class App:
                 return
             self.load_models()
         else:
-            self.modelcb.config(state="disabled"); self.bmexp.config(state="disabled")
+            self.modelcb.config(state="disabled"); self.model_buttons("disabled")
             self.draw()
 
     def load_models(self):
@@ -954,12 +957,12 @@ class App:
             self.work('Building the list of models and their textures (once, about 30 seconds)...', self.be.build_model_index, done)
             return
         if not models:
-            self.modelcb.config(values=[], state="disabled"); self.bmexp.config(state="disabled")
+            self.modelcb.config(values=[], state="disabled"); self.model_buttons("disabled")
             self.model.set('No model uses this texture directly')
             self.mdl = None
             self.draw()
             return
-        self.modelcb.config(values=models, state="readonly"); self.bmexp.config(state="normal")
+        self.modelcb.config(values=models, state="readonly"); self.model_buttons("normal")
         if self.model.get() not in models:
             self.model.set(models[0])
         self.pick_model()   # (re)load: the model is cached; textures follow the mods as they are now
@@ -1402,7 +1405,7 @@ class App:
         self.painting.set(False)
         self.view.set('model')
         self.modelcb.config(values=[name], state='readonly')
-        self.bmexp.config(state='normal')
+        self.model_buttons('normal')
         self.model.set(name)
         self.title.config(text=name)
         idx = self.be.model_index() or {}
@@ -1481,6 +1484,7 @@ class App:
             self.modelcb.config(values=['Level: ' + name], state='readonly')
             self.model.set('Level: ' + name)
             self.bmexp.config(state='normal')
+            self.bobj.config(state='disabled')
             self.title.config(text=name)
             rows = self.mdl.rows
             shown = len({int(o) for m in self.mdl.meshes for o in numpy.unique(m.owner)})
@@ -1752,6 +1756,67 @@ class App:
             messagebox.showinfo('Exported', 'Saved %d of %d textures of %s in\n%s%s' % (
                 n, len(names), model, folder, ('\n\nNot saved:\n' + '\n'.join(failed[:10])) if failed else ''), parent=self.root)
         self.work('Exporting the %d textures of %s...' % (len(names), model), job, done)
+
+    def model_buttons(self, state):
+        self.bmexp.config(state=state)
+        self.bobj.config(state=state)
+
+    def selected_list_model(self):
+        sel = self.mlb.curselection()
+        return self.models_all[sel[0]] if sel and self.models_all else None
+
+    def export_model_obj(self, model=None):
+        """The model as OBJ + MTL with PNG textures (tools/models/export_model.py), using the textures the game would load
+        (the winning mod's copy, by the same mod order as the rest of the window)."""
+        model = model or (None if self.level else self.model.get())
+        if not model or model.startswith('Level: ') or self.busy:
+            if not model:
+                self.say('Pick a model in the Models tab first.')
+            return
+        script = next((p for p in (os.path.join(HERE, 'export_model.py'), os.path.join(HERE, '..', 'models', 'export_model.py'))
+                       if os.path.exists(p)), None)
+        if script is None:
+            self.error('Export model', ToolError('export_model.py was not found next to this program or in ../models.'))
+            return
+        folder = filedialog.askdirectory(parent=self.root, title='Folder for %s (OBJ, MTL and textures)' % model,
+                                         initialdir=self.cfg['last_dir'])
+        if not folder:
+            return
+        self.cfg['last_dir'] = folder
+        save_config(self.cfg)
+
+        def job():
+            import contextlib
+            import importlib.machinery
+            import importlib.util
+            import io
+            ld = importlib.machinery.SourceFileLoader('export_model', script)
+            em = importlib.util.module_from_spec(importlib.util.spec_from_loader('export_model', ld))
+            ld.exec_module(em)
+
+            def winner(_mods, name):   # the window's own mod order (mods.ini or nx2navi.ini)
+                return next((p for _, p, win in self.be.versions(name + '.bntx.zs') if win and p), None)
+            em.mod_texture = winner
+            out, argv = io.StringIO(), sys.argv
+            sys.argv = ['export_model.py', model, folder, '--romfs', self.cfg['romfs'], '--mods', self.cfg['mods']]
+            try:
+                with contextlib.redirect_stdout(out):
+                    em.main()
+            except SystemExit as e:
+                if e.code not in (0, None):
+                    raise ToolError(str(e.code))
+            finally:
+                sys.argv = argv
+            lines = out.getvalue().strip().splitlines()   # keep the summary and the not-exported list, not each texture
+            return chr(10).join(x for x in lines if ' meshes, ' in x or x.startswith('textures not exported'))
+
+        def done(res, err):
+            if err:
+                self.error('Export model failed', err)
+                return
+            self.say(res.splitlines()[0] if res else 'Exported %s' % model)
+            messagebox.showinfo('Exported', res or model, parent=self.root)
+        self.work('Exporting %s as OBJ...' % model, job, done)
 
     # --- recolour and outside editing (previewed on the texture and the model before importing)
     def end_override(self):
