@@ -5,7 +5,7 @@
 
 Reads every level layout (Banc/<area>/<level>_Static/_Dynamic.bcett.byml.zs) and, for every actor placed there, its
 actor pack (Pack/Actor/<actor>.pack.zs) to find the model it shows (ActorParam -> ModelInfo, following $parent).
-Writes {"romfs": ..., "levels": {"Area/Level": [[actor, model or "", x, y, z, rx, ry, rz, sx, sy, sz], ...]},
+Writes {"romfs": ..., "levels": {"Area/Level": [[actor, model or "", x, y, z, rx, ry, rz, sx, sy, sz, hash], ...]},
 "models": {actor: model}, "shapes": {actor: [collision shape, ...]}} (shapes: PhysicsParam -> ControllerSetParam ->
 ShapeParam -> Phive/Shape/Dcc/<shape>.bphsh.zs, drawn for terrain whose own mesh cannot be read). Rotations are radians (X, Y, Z). About a minute.
 """
@@ -160,12 +160,13 @@ def main(romfs, out, only=None):
                 actor_models[name], shp = actor_model(rd, name, models)
                 if shp:
                     actor_shapes_[name] = shp
-            rows.append([name, actor_models[name]] + vec(a, 'Translate', 0.0) + vec(a, 'Rotate', 0.0) + vec(a, 'Scale', 1.0))
+            rows.append([name, actor_models[name]] + vec(a, 'Translate', 0.0) + vec(a, 'Rotate', 0.0) + vec(a, 'Scale', 1.0)
+                        + [int(a.get('Hash') or 0)])
         if i % 10 == 0:
             print('%d/%d levels files, %d actors' % (i, len(files), len(actor_models)), flush=True)
     tmp = out + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as fp:
-        json.dump({'romfs': os.path.abspath(romfs), 'levels': levels, 'models': actor_models, 'shapes': actor_shapes_}, fp, separators=(',', ':'))
+        json.dump({'version': 2, 'romfs': os.path.abspath(romfs), 'levels': levels, 'models': actor_models, 'shapes': actor_shapes_}, fp, separators=(',', ':'))
     os.replace(tmp, out)
     print('done: %d levels, %d actors, %d with a model' % (len(levels), len(actor_models),
                                                          sum(1 for v in actor_models.values() if v)))

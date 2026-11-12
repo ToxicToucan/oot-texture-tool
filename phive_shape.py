@@ -34,6 +34,37 @@ def _rel(d, field):
     return field + off, n
 
 
+def mesh_shape(d, o):
+    """(positions, triangles) of the hknpMeshShape object at o: vertex scale at +0x40, geometry sections at +0x88."""
+    scale = struct.unpack_from('<3f', d, o + 0x40)
+    if not all(s > 0 for s in scale):
+        raise ValueError('unexpected vertex scale %r' % (scale,))
+    so, n = _rel(d, o + 0x88)
+    return _read_sections(d, so, n, scale)
+
+
+def _read_sections(d, o, n, scale):
+    pos, tris, base = [], [], 0
+    for k in range(n):
+        s = o + 0x40 * k
+        pp, np_ = _rel(d, s + 0x08)
+        vp, nv = _rel(d, s + 0x10)
+        offset = np.array(struct.unpack_from('<3i', d, s + 0x20), np.float32)
+        prim = np.frombuffer(d, np.uint8, np_ * 4, pp).reshape(-1, 4).astype(np.int64)
+        nverts = nv // 6
+        q = np.frombuffer(d, '<u2', nverts * 3, vp).reshape(-1, 3).astype(np.float32)
+        pos.append((q + offset) / np.array(scale, np.float32))
+        tri = prim[:, :3]
+        quad = prim[prim[:, 2] != prim[:, 3]]
+        t = np.concatenate([tri, quad[:, [0, 2, 3]]]) if len(quad) else tri
+        t = t[(t < nverts).all(1)]
+        tris.append(t + base)
+        base += nverts
+    if not pos:
+        return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.int64)
+    return np.concatenate(pos), np.concatenate(tris)
+
+
 def read(d):
     """(positions float32 (n, 3), triangles int64 (m, 3)) of every geometry section, in the shape's own space."""
     tag = d.find(b'TAG0')
@@ -70,20 +101,4 @@ def read(d):
     if found is None:
         raise ValueError('no geometry sections found')
     o, n = found
-    pos, tris, base = [], [], 0
-    for k in range(n):
-        s = o + 0x40 * k
-        pp, np_ = _rel(d, s + 0x08)
-        vp, nv = _rel(d, s + 0x10)
-        offset = np.array(struct.unpack_from('<3i', d, s + 0x20), np.float32)
-        prim = np.frombuffer(d, np.uint8, np_ * 4, pp).reshape(-1, 4).astype(np.int64)
-        nverts = nv // 6
-        q = np.frombuffer(d, '<u2', nverts * 3, vp).reshape(-1, 3).astype(np.float32)
-        pos.append((q + offset) / np.array(scale, np.float32))
-        tri = prim[:, :3]
-        quad = prim[prim[:, 2] != prim[:, 3]]
-        t = np.concatenate([tri, quad[:, [0, 2, 3]]]) if len(quad) else tri
-        t = t[(t < nverts).all(1)]
-        tris.append(t + base)
-        base += nverts
-    return np.concatenate(pos), np.concatenate(tris)
+    return _read_sections(d, o, n, scale)

@@ -2,7 +2,7 @@
 """Put a level together for the texture tool's Levels tab: every placed actor's model, moved, turned and scaled into
 place, as one bfres_model.Model that bfres_model.render can draw.
 
-Rows come from level_index.py: [actor, model, x, y, z, rx, ry, rz, sx, sy, sz] (rotations in radians, applied X then
+Rows come from level_index.py: [actor, model, x, y, z, rx, ry, rz, sx, sy, sz, hash] (rotations in radians, applied X then
 Y then Z). Terrain pieces stored as "taskmesh" and actors without a model are left out.
 
 Meshes that share textures and material are merged (far fewer draw steps); each triangle remembers its row
@@ -27,12 +27,19 @@ def placement(row):
     return bfres_model._euler(rx, ry, rz), np.array(row[8:11], np.float32), np.array(row[2:5], np.float32)
 
 
-def build(name, rows, get_model, skip=None):
+def build(name, rows, get_model, skip=None, world=None):
     """A Model of the whole level. get_model(model name) -> bfres_model.Model or None. skip(row) -> True leaves a row
-    out. The result has .rows (the index rows), .centre and .radius (for the camera)."""
+    out. world: {row number: [(positions, triangles)]} already in place (the level's own collision for terrain), drawn
+    plain grey instead of the row's model. The result has .rows (the index rows), .centre and .radius (for the camera)."""
     groups = {}
     for i, row in enumerate(rows):
         if not row[1] or (skip and skip(row)):
+            continue
+        if world and world.get(i):
+            for pos, tris in world[i]:
+                if len(tris):
+                    groups.setdefault(((), bfres_model.COLLISION), []).append(
+                        (pos.astype(np.float32), np.zeros((len(pos), 2), np.float32), np.zeros_like(pos, np.float32), tris, i))
             continue
         m = get_model(row[1])
         if m is None:

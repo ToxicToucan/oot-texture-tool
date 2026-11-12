@@ -11,6 +11,7 @@ import json
 import math
 import os
 import queue
+import re
 import shutil
 import struct
 import subprocess
@@ -384,13 +385,13 @@ class Backend:
 
     # --- levels (the Levels tab)
     def level_index(self):
-        """{"Area/Level": [[actor, model, x, y, z, rx, ry, rz, sx, sy, sz], ...]} from the cache, or None."""
+        """{"Area/Level": [[actor, model, x, y, z, rx, ry, rz, sx, sy, sz, hash], ...]} from the cache, or None."""
         if getattr(self, '_levels', None) is not None:
             return self._levels
         try:
             j = json.load(open(os.path.join(os.path.dirname(self.index_path), 'level_index.json'), encoding='utf-8'))
-            if norm(j['romfs']) != norm(self.cfg['romfs']) or 'shapes' not in j:
-                return None   # another romfs, or an older list without collision shapes: rebuilt
+            if norm(j['romfs']) != norm(self.cfg['romfs']) or j.get('version', 1) < 2:
+                return None   # another romfs, or an older list (no collision shapes or actor hashes): rebuilt
             self._levels = j['levels']
             self._actor_shapes, self._actor_models = j['shapes'], j['models']
             return self._levels
@@ -449,11 +450,49 @@ class Backend:
         for r in rows:
             if r[1] in getattr(self, '_flat', ()) and r[1] not in stand and (far or not level_view.is_far(r)):
                 stand[r[1]] = self.collision_model(r[1], self._actor_shapes.get(r[0], []))
+        # the rest (pieces without a shape of their own): the level's static collision, placed as the game places it
+        need = [i for i, r in enumerate(rows) if r[1] in getattr(self, '_flat', ()) and stand.get(r[1]) is None
+                and (far or not level_view.is_far(r))]
+        world = {}
+        if need:
+            say('Reading the collision of %s...' % name)
+            for c in self.level_collision(name):
+                for i in need:
+                    if i not in world and len(rows[i]) > 11:
+                        g = c.shapes_for(rows[i][11], rows[i][2:5])
+                        if g:
+                            world[i] = g
         say('Putting %s together...' % name)
-        model = level_view.build(name, rows, lambda m: cache[m] if cache.get(m) is not None and cache[m].meshes else stand.get(m), skip)
+        model = level_view.build(name, rows, lambda m: cache[m] if cache.get(m) is not None and cache[m].meshes else stand.get(m), skip,
+                                 world)
         say('Reading the textures of %s...' % name)
         tex = self.level_textures(model, say)
         return model, level_view.light(model), tex
+
+    def level_collision(self, name):
+        """phive_compound.Collision for each part of a level's static collision (Phive/StaticCompoundBody/<area>/
+        <level>[_X*_Z*].bphsc), kept for the session."""
+        import phive_compound
+        cache = getattr(self, '_level_collision', None)
+        if cache is None:
+            cache = self._level_collision = {}
+        if name not in cache:
+            area, level = name.split('/', 1)
+            folder = os.path.join(self.cfg['romfs'], 'Phive', 'StaticCompoundBody', area)
+            pat = re.compile(re.escape(level) + r'(_X\d+_Z\d+)?\.')
+            files = sorted(f for f in os.listdir(folder) if pat.match(f)) if os.path.isdir(folder) else []
+            out = []
+            with tempfile.TemporaryDirectory() as tmp:
+                pairs = [(os.path.join(folder, f), os.path.join(tmp, '%d.bin' % i)) for i, f in enumerate(files)]
+                self.unzs_many(pairs)
+                for _, p in pairs:
+                    try:
+                        out.append(phive_compound.Collision(open(p, 'rb').read()))
+                    except Exception:  # noqa: BLE001 - unreadable parts are left out
+                        pass
+            cache.clear()   # one level at a time: field levels hold a few hundred parts
+            cache[name] = out
+        return cache[name]
 
     def collision_model(self, model, shapes=None):
         """A stand-in Model (plain grey) made from the collision shapes of a terrain model the reader cannot draw, or None.

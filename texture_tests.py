@@ -174,6 +174,17 @@ def levels(work):
     check(len(tris) >= 10 and numpy.allclose(lo, (-0.5996, 0, -0.0996), atol=1e-3)
           and numpy.allclose(hi, (0.5996, 3.125, 0.0996), atol=1e-3),
           'collision shape of Land_DodongoCave_Ladder_A_01: %d triangles, box %s to %s' % (len(tris), lo.round(3), hi.round(3)))
+    # the level's own static collision, found by each actor's layout hash
+    import phive_compound
+    with tempfile.TemporaryDirectory() as tmp:
+        data, _ = tt.unzs(os.path.join(ROMFS, 'Phive', 'StaticCompoundBody', 'DreamWorld',
+                                       'DinolfosStage.Nin_Ounce_NVN2.bphsc.zs'), ROMFS, tmp)
+    col = phive_compound.Collision(data)
+    found = [(r, col.shapes_for(r[11], r[2:5])) for r in rows if len(r) > 11]
+    found = [(r, g) for r, g in found if g]
+    near = all(numpy.linalg.norm((g[0][0].min(0) + g[0][0].max(0)) / 2 - numpy.array(r[2:5])) < 200 for r, g in found)
+    check(len(found) >= 3 and near, 'DinolfosStage static collision: %d actors placed, %d triangles' % (
+        len(found), sum(len(t) for r, g in found for p, t in g)))
     light = level_view.light(lv, 100)
     check(0 < level_view.stats(light)[1] < level_view.stats(lv)[1], 'light copy: %d of %d triangles' % (
         level_view.stats(light)[1], level_view.stats(lv)[1]))
