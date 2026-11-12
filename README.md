@@ -10,6 +10,7 @@
 - **Import** your edited PNG or DDS into a mod folder. Every mip level is rebuilt from your image. BC1, BC3, BC4, BC5, BC7 and ASTC textures can be imported: about 97% of the game's textures.
 - **See your mod's version** right away. Textures your mods replace are marked ◆, and **Show** flips between the original and each mod's copy.
 - **See it on the model.** **View: On model** draws the texture (or your mod's copy) on the character or object that uses it. Drag to turn it, scroll to zoom.
+- **Recolour** with hue, saturation and brightness sliders, watching the result on the model, or **edit in your paint program** and see each save on the model straight away.
 
 ![Pink hair on adult Link in the model view](docs/screenshot-model.png)
 
@@ -119,6 +120,17 @@ mods\
 **Open mods folder** (top right of the window) opens it in Explorer.
 
 If your mod includes an ASTC texture, also share the `~Size table (made by the texture tool)` folder, or tell people to click **Rebuild size table** after installing it.
+
+### Quicker ways to edit
+
+- **Recolour...** opens hue, saturation and brightness sliders. The preview (texture or model) updates as you move them.
+  - **Import into mod...** puts the result in a mod; **Save PNG...** keeps it as a file.
+  - It suits colour changes like hair, tunics and gems.
+- **Edit in paint program** opens the texture in your default image editor. Each time you save there, the tool's preview (texture or model) updates within a second. When you're happy, click **Import edited file**.
+- **Remove from mod** (when **Show** is on a mod's copy) deletes that mod's copy of the texture, after asking. The game's own texture is never touched.
+- **Export its textures...** (in the model view) saves every texture of the shown model as PNGs, for repainting a whole character.
+
+![Recolouring adult Link's hair, previewed on the model](docs/screenshot-recolour.png)
 
 ### Texture name tips
 

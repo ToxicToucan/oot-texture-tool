@@ -69,6 +69,11 @@ def save_config(cfg, path=CONFIG):
         pass
 
 
+def time_now():
+    import time
+    return time.strftime('%I:%M:%S %p').lstrip('0')
+
+
 def norm(p):
     return os.path.normcase(os.path.abspath(p))
 
@@ -484,7 +489,12 @@ class App:
         self.modelcb = ttk.Combobox(mrow, textvariable=self.model, state='disabled', width=46)
         self.modelcb.pack(side='left')
         self.modelcb.bind('<<ComboboxSelected>>', lambda _: self.pick_model())
+        self.bmexp = ttk.Button(mrow, text='Export its textures...', command=self.export_model_textures, state='disabled')
+        self.bmexp.pack(side='left', padx=(6, 0))
         self.mdl, self.mdl_tex, self.yaw, self.pitch, self.zoom, self.drag = None, {}, 0.5, -0.2, 1.0, None
+        self.override = None      # a recoloured or edited image shown instead of the texture (not imported yet)
+        self.recolour_win = None
+        self.edit_file, self.edit_mtime = None, None
         btns = ttk.Frame(right)
         btns.pack(anchor='w', pady=(0, 6))
         self.bexp = ttk.Button(btns, text='Export PNG...', command=lambda: self.export('.png'), state='disabled')
@@ -493,6 +503,12 @@ class App:
         self.bdds.pack(side='left', padx=(6, 0))
         self.bimp = ttk.Button(btns, text='Import PNG or DDS...', command=self.import_, state='disabled')
         self.bimp.pack(side='left', padx=6)
+        self.brec = ttk.Button(btns, text='Recolour...', command=self.recolour, state='disabled')
+        self.brec.pack(side='left')
+        self.bedit = ttk.Button(btns, text='Edit in paint program', command=self.edit_outside, state='disabled')
+        self.bedit.pack(side='left', padx=6)
+        self.bdel = ttk.Button(btns, text='Remove from mod', command=self.remove_copy, state='disabled')
+        self.bdel.pack(side='left')
         self.canvas = tk.Canvas(right, width=int(PREVIEW * f), height=int(PREVIEW * f), highlightthickness=1,
                                 highlightbackground='#aaa', bg='#ddd')
         self.canvas.pack(fill='both', expand=True)
@@ -618,11 +634,13 @@ class App:
         self.title.config(text=name[:-8])
         self.details.config(text='Could not read this texture.')
         self.canimport.config(text=str(err), foreground='#a00')
-        for b in (self.bexp, self.bdds, self.bimp):
+        for b in (self.bexp, self.bdds, self.bimp, self.brec, self.bedit, self.bdel):
             b.config(state='disabled')
         self.say('Could not read %s' % name)
 
     def show(self, name, path, orig, info, img):
+        if name != self.name:
+            self.end_override()
         self.name, self.path, self.orig, self.info, self.img = name, path, orig, info, img
         scale = self.draw()
         self.title.config(text=name[:-8])
@@ -645,6 +663,9 @@ class App:
         self.bexp.config(state='normal')
         self.bdds.config(state='normal' if info['dds'] and hasattr(tt, 'export_dds') else 'disabled')
         self.bimp.config(state='normal')
+        self.brec.config(state='normal' if orig['importable'] else 'disabled')
+        self.bedit.config(state='normal' if orig['importable'] else 'disabled')
+        self.bdel.config(state='normal' if path else 'disabled')
         self.say('%s: %s, %d x %d, %d mip levels; showing %s' % (name, info['format'], info['w'], info['h'], info['mips'],
                                                                  current))
         if self.view.get() == 'model':
@@ -661,7 +682,7 @@ class App:
                 return
             self.load_models()
         else:
-            self.modelcb.config(state='disabled')
+            self.modelcb.config(state="disabled"); self.bmexp.config(state="disabled")
             self.draw()
 
     def load_models(self):
@@ -682,12 +703,12 @@ class App:
             self.work('Building the list of models and their textures (once, about 30 seconds)...', self.be.build_model_index, done)
             return
         if not models:
-            self.modelcb.config(values=[], state='disabled')
+            self.modelcb.config(values=[], state="disabled"); self.bmexp.config(state="disabled")
             self.model.set('No model uses this texture directly')
             self.mdl = None
             self.draw()
             return
-        self.modelcb.config(values=models, state='readonly')
+        self.modelcb.config(values=models, state="readonly"); self.bmexp.config(state="normal")
         if self.model.get() not in models:
             self.model.set(models[0])
             self.pick_model()
@@ -754,14 +775,15 @@ class App:
         tex = dict(self.mdl_tex)
         hl = self.be.model_slot(self.name) if self.name else None
         if hl and self.img is not None:
-            small = self.img.copy()
+            small = (self.override or self.img).copy()
             small.thumbnail((1024, 1024))
             tex[hl] = np.asarray(small.convert('RGBA'))
-        k = 2 if fast else 1
-        out = bfres_model.render(self.mdl, tex, (cw // k, ch // k), self.yaw, self.pitch, highlight=hl, zoom=self.zoom)
+        # big windows draw at up to 900 pixels and are scaled up (dragging at half that)
+        k = max(1.0, max(cw, ch) / 900.0) * (2 if fast else 1)
+        out = bfres_model.render(self.mdl, tex, (int(cw / k), int(ch / k)), self.yaw, self.pitch, highlight=hl, zoom=self.zoom)
         img = Image.fromarray(out)
         if k > 1:
-            img = img.resize((cw, ch), Image.NEAREST)
+            img = img.resize((cw, ch), Image.NEAREST if fast else Image.BILINEAR)
         self.photo = ImageTk.PhotoImage(img)
         self.canvas.create_image(self.canvas.winfo_width() // 2, self.canvas.winfo_height() // 2, image=self.photo)
         return 1
@@ -771,7 +793,7 @@ class App:
         from PIL import Image, ImageTk
         if self.view.get() == 'model':
             return self.draw_model(fast)
-        img = self.img
+        img = self.override or self.img
         if img is None or self.info is None:
             return 1
         cw, ch = max(16, self.canvas.winfo_width() - 4), max(16, self.canvas.winfo_height() - 4)
@@ -817,21 +839,23 @@ class App:
                     what, out, '' if kind == 'PNG' else ' and format'), parent=self.root)
         self.work('Exporting %s...' % name, lambda: self.be.export(name, out, path), done)
 
-    def import_(self):
+    def import_(self, png=None):
+        """Import a file (picked here, or given: a recoloured or edited copy) into a mod of the owner's choice."""
         info, name = self.orig, self.name
         if not info or self.busy:
             return
         if not info['importable']:
             self.error('Cannot import into this texture', ToolError('%s is %s.\n\n%s' % (name, info['format'], info['why_not'])))
             return
-        types = [('PNG or DDS', '*.png *.dds'), ('PNG image', '*.png'), ('DDS texture', '*.dds')] if hasattr(tt, 'read_dds') \
-            else [('PNG image', '*.png')]
-        png = filedialog.askopenfilename(parent=self.root, title='Pick the edited file for %s (%d x %d)' % (name[:-8], info['w'], info['h']),
-                                         initialdir=self.cfg['last_dir'], filetypes=types)
-        if not png:
-            return
-        self.cfg['last_dir'] = os.path.dirname(png)
-        save_config(self.cfg)
+        if png is None:
+            types = [('PNG or DDS', '*.png *.dds'), ('PNG image', '*.png'), ('DDS texture', '*.dds')] if hasattr(tt, 'read_dds') \
+                else [('PNG image', '*.png')]
+            png = filedialog.askopenfilename(parent=self.root, title='Pick the edited file for %s (%d x %d)' % (name[:-8], info['w'], info['h']),
+                                             initialdir=self.cfg['last_dir'], filetypes=types)
+            if not png:
+                return
+            self.cfg['last_dir'] = os.path.dirname(png)
+            save_config(self.cfg)
         try:
             self.be.check_import(info, png)
         except ToolError as e:
@@ -862,11 +886,218 @@ class App:
             self.modded = self.be.modded()
             self.filter()
             self.versions = self.be.versions(name)
+            self.end_override()
             self.load(name, path)
             messagebox.showinfo('Imported', 'Done. Wrote:\n%s\n\n%s%s\n\nThe preview now shows the mod\'s copy; use Show to '
                                 'compare it with the original.' % (path, how, self.size_note()), parent=self.root)
         self.work('Importing into %s (encoding every mip level, this can take a little while)...' % mod,
                   lambda: self.be.do_import(info, png, mod), done)
+
+    def remove_copy(self):
+        """Delete the shown mod's copy of this texture (the game's own files are never touched)."""
+        name, path = self.name, self.path
+        if not path or self.busy:
+            return
+        mod = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(path))))
+        if not inside(path, self.cfg['mods']) or inside(path, self.cfg['romfs']):
+            self.error('Not removed', ToolError('That file is not in the mods folder.'))
+            return
+        if not messagebox.askyesno('Remove from mod?', 'Delete the mod "%s"\'s copy of %s?\n\n%s\n\nThe game\'s own texture is '
+                                   'not touched; this mod just stops changing it. This cannot be undone (export it first '
+                                   'to keep it).' % (mod, name[:-8], path), parent=self.root):
+            return
+
+        def job():
+            os.remove(path)
+            for d in (os.path.dirname(path), os.path.dirname(os.path.dirname(path))):   # Tex, romfs when empty
+                try:
+                    os.rmdir(d)
+                except OSError:
+                    break
+            if self.be.size_mod_exists():
+                self.be.rebuild_sizes()
+
+        def done(_, err):
+            if err:
+                self.error('Not removed', err)
+                return
+            self.say('Removed %s from the mod "%s"' % (name[:-8], mod))
+            self.modded = self.be.modded()
+            self.filter()
+            self.versions = self.be.versions(name)
+            self.load(name, next((p for _, p, win in self.versions if win), None))
+        self.work('Removing %s from %s...' % (name[:-8], mod), job, done)
+
+    def export_model_textures(self):
+        """Every texture the shown model uses, as PNGs in a folder (for painting a whole character)."""
+        model = self.model.get()
+        idx = self.be.model_index() or {}
+        names = idx.get(model)
+        if not names or self.busy:
+            return
+        folder = filedialog.askdirectory(parent=self.root, title='Folder for the %d textures of %s' % (len(names), model),
+                                         initialdir=self.cfg['last_dir'])
+        if not folder:
+            return
+        self.cfg['last_dir'] = folder
+        save_config(self.cfg)
+
+        def job():
+            done_n, failed = 0, []
+            for t in names:
+                try:
+                    tt.export_png(self.be.path(t + '.bntx.zs'), os.path.join(folder, t + '.png'))
+                    done_n += 1
+                except Exception as e:  # noqa: BLE001 - listed to the owner
+                    failed.append('%s: %s' % (t, e))
+            return done_n, failed
+
+        def done(res, err):
+            if err:
+                self.error('Export failed', err)
+                return
+            n, failed = res
+            self.say('Exported %d textures of %s to %s' % (n, model, folder))
+            messagebox.showinfo('Exported', 'Saved %d of %d textures of %s in\n%s%s' % (
+                n, len(names), model, folder, ('\n\nNot saved:\n' + '\n'.join(failed[:10])) if failed else ''), parent=self.root)
+        self.work('Exporting the %d textures of %s...' % (len(names), model), job, done)
+
+    # --- recolour and outside editing (previewed on the texture and the model before importing)
+    def end_override(self):
+        self.override = None
+        self.edit_file = None
+        if self.recolour_win is not None:
+            try:
+                self.recolour_win.destroy()
+            except tk.TclError:
+                pass
+            self.recolour_win = None
+
+    def temp_png(self, img, tag):
+        d = os.path.join(os.environ.get('LOCALAPPDATA', HERE), 'oot-texture-gui', 'edit')
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, '%s_%s.png' % (self.name[:-8], tag))
+        img.save(path)
+        return path
+
+    def recolour(self):
+        if not self.info or self.img is None or self.busy:
+            return
+        if self.recolour_win is not None:
+            self.recolour_win.lift()
+            return
+        base = self.img.convert('RGBA')
+        small = base.copy()
+        small.thumbnail((1024, 1024))
+        w = self.recolour_win = tk.Toplevel(self.root)
+        w.title('Recolour %s' % self.name[:-8])
+        w.transient(self.root)
+        w.resizable(False, False)
+        f = ttk.Frame(w, padding=10)
+        f.pack(fill='both')
+        hue, sat, val = tk.DoubleVar(value=0), tk.DoubleVar(value=100), tk.DoubleVar(value=100)
+        pending = [None]
+
+        def apply(img):
+            from PIL import Image
+            h, s, v = img.convert('RGB').convert('HSV').split()
+            dh = int(round(hue.get() / 360.0 * 256)) % 256
+            h = h.point(lambda x: (x + dh) % 256)
+            s = s.point(lambda x: max(0, min(255, int(x * sat.get() / 100.0))))
+            v = v.point(lambda x: max(0, min(255, int(x * val.get() / 100.0))))
+            out = Image.merge('HSV', (h, s, v)).convert('RGB').convert('RGBA')
+            out.putalpha(img.getchannel('A'))
+            return out
+
+        def update(*_):
+            if pending[0]:
+                self.root.after_cancel(pending[0])
+
+            def go():
+                pending[0] = None
+                self.override = apply(small).resize(base.size) if small.size != base.size else apply(small)
+                self.draw()
+            pending[0] = self.root.after(120, go)
+
+        rows = [('Hue (degrees)', hue, -180, 180), ('Saturation (%)', sat, 0, 300), ('Brightness (%)', val, 0, 300)]
+        for r, (label, var, lo, hi) in enumerate(rows):
+            ttk.Label(f, text=label).grid(row=r, column=0, sticky='w', padx=(0, 8))
+            ttk.Scale(f, from_=lo, to=hi, variable=var, length=280, command=update).grid(row=r, column=1, sticky='we')
+            ttk.Label(f, textvariable=var, width=6).grid(row=r, column=2, sticky='e')
+            var.trace_add('write', lambda *_ , v=var: v.set(round(v.get())) if v.get() != round(v.get()) else None)
+        ttk.Label(f, text='The preview (texture or model) shows the result. Nothing is written until you import.',
+                  foreground='#555').grid(row=3, column=0, columnspan=3, sticky='w', pady=(6, 6))
+        b = ttk.Frame(f)
+        b.grid(row=4, column=0, columnspan=3, sticky='e')
+
+        def reset():
+            hue.set(0); sat.set(100); val.set(100); update()
+
+        def do_import():
+            full = apply(base)
+            path = self.temp_png(full, 'recolour')
+            self.recolour_win.destroy()
+            self.recolour_win = None
+            self.import_(path)
+
+        def save():
+            out = filedialog.asksaveasfilename(parent=w, title='Save recoloured PNG', initialdir=self.cfg['last_dir'],
+                                               initialfile=self.name[:-8] + '_recolour.png', defaultextension='.png',
+                                               filetypes=[('PNG image', '*.png')])
+            if out:
+                apply(base).save(out)
+                self.say('Saved %s' % out)
+
+        def cancel():
+            self.end_override()
+            self.draw()
+
+        ttk.Button(b, text='Reset', command=reset).pack(side='left')
+        ttk.Button(b, text='Save PNG...', command=save).pack(side='left', padx=6)
+        ttk.Button(b, text='Import into mod...', command=do_import).pack(side='left')
+        ttk.Button(b, text='Cancel', command=cancel).pack(side='left', padx=(6, 0))
+        w.protocol('WM_DELETE_WINDOW', cancel)
+
+    def edit_outside(self):
+        """Open the shown copy in the default paint program; each time it is saved, the preview (and model) update, and
+        Import takes it."""
+        if not self.info or self.img is None or self.busy:
+            return
+        self.end_override()
+        path = self.temp_png(self.img.convert('RGBA'), 'edit')
+        self.edit_file, self.edit_mtime = path, os.path.getmtime(path)
+        try:
+            os.startfile(path, 'edit')
+        except OSError:
+            try:
+                os.startfile(path)
+            except OSError as e:
+                self.error('Could not open a paint program', ToolError('%s\n\nOpen this file yourself:\n%s' % (e, path)))
+        self.say('Editing %s in your paint program. Save it there; the preview updates. Then click Import edited file.' % path)
+        self.bimp.config(text='Import edited file', command=lambda: self.import_(self.edit_file))
+        self.root.after(1000, self.watch_edit)
+
+    def watch_edit(self):
+        if not self.edit_file:
+            self.bimp.config(text='Import PNG or DDS...', command=self.import_)
+            return
+        try:
+            m = os.path.getmtime(self.edit_file)
+            if m != self.edit_mtime:
+                from PIL import Image
+                self.edit_mtime = m
+                img = Image.open(self.edit_file)
+                img.load()
+                if img.size != self.img.size:
+                    self.say('The edited file is %d x %d; it must stay %d x %d.' % (img.size + self.img.size))
+                else:
+                    self.override = img.convert('RGBA')
+                    self.draw()
+                    self.say('Edited copy saved at %s: shown in the preview. Click Import edited file to put it in a mod.'
+                             % time_now())
+        except (OSError, ValueError):
+            pass
+        self.root.after(1000, self.watch_edit)
 
     def size_note(self):
         """What to do about the size table mod, if there is one."""
