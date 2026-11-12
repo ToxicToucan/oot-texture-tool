@@ -242,9 +242,10 @@ class Backend:
             return self._index
         try:
             j = json.load(open(self.index_path, encoding='utf-8'))
-            if norm(j['romfs']) != norm(self.cfg['romfs']):
-                return None
+            if norm(j['romfs']) != norm(self.cfg['romfs']) or 'no_meshes' not in j:
+                return None   # another romfs, or an older list: rebuilt
             self._index = j['index']
+            self._flat = set(j['no_meshes'])
             users = {}
             for m, ts in self._index.items():
                 for t in ts:
@@ -279,7 +280,7 @@ class Backend:
             base = m.split('.')[0]
             named = base.lower() in tex.lower()
             shared = len(words & set(base.lower().split('_')))
-            return (not named, -shared, len(self._index.get(m, [])), m.lower())
+            return (m in self._flat, not named, -shared, len(self._index.get(m, [])), m.lower())
         return sorted(users, key=score)
 
     def model_slot(self, name):
@@ -740,6 +741,12 @@ class App:
         name = self.model.get()
         if self.busy:
             return self.root.after(200, self.pick_model)
+        if name in getattr(self.be, '_flat', ()):
+            import bfres_model
+            self.mdl = bfres_model.Model(name, [])   # terrain piece: says so without loading it
+            self.say('%s keeps its meshes in a form the preview cannot read yet.' % name)
+            self.draw()
+            return
 
         def job():
             m = self.be.load_model(name)
