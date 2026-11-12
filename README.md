@@ -302,6 +302,7 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 | `zs_helper.py` | zstd with the game's dictionaries |
 | `bfres_model.py` | Reads models and draws them for the model view |
 | `model_index.py` | Lists which models use which textures (Python 3.14+) |
+| `texture_tests.py` | Regression checks (runs in a temporary folder): `py -3.12 texture_tests.py` |
 | `texconv.cpp`, `build-texconv.cmd` | The codec helper (ASTC decode; BC1, BC3, BC4, BC5, BC7 encode) and its build script |
 | `textures/` | The `astc2bc7` library that `texconv` links (ASTC decode, BC7 encode) |
 
