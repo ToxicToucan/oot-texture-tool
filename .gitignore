@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+texconv.exe
+texconv.obj
+astcdec-*.dll
+*.png
+!docs/*.png
