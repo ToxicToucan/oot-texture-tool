@@ -6,8 +6,9 @@
 Reads every level layout (Banc/<area>/<level>_Static/_Dynamic.bcett.byml.zs) and, for every actor placed there, its
 actor pack (Pack/Actor/<actor>.pack.zs) to find the model it shows (ActorParam -> ModelInfo, following $parent).
 Writes {"romfs": ..., "levels": {"Area/Level": [[actor, model or "", x, y, z, rx, ry, rz, sx, sy, sz, hash], ...]},
-"models": {actor: model}, "shapes": {actor: [collision shape, ...]}} (shapes: PhysicsParam -> ControllerSetParam ->
-ShapeParam -> Phive/Shape/Dcc/<shape>.bphsh.zs, drawn for terrain whose own mesh cannot be read). Rotations are radians (X, Y, Z). About a minute.
+"models": {actor: model}, "shapes": {actor: [collision shape, ...]}, "terrain": {"Area/Level": [terrain scene, x, y, z]}}
+(shapes: PhysicsParam -> ControllerSetParam -> ShapeParam -> Phive/Shape/Dcc/<shape>.bphsh.zs, drawn for terrain whose
+own mesh cannot be read; terrain: Banc/GameBancParam, the heightmaps under TerrainArc). Rotations are radians (X, Y, Z). About a minute.
 """
 import json
 import os
@@ -50,6 +51,28 @@ def ref_path(ref):
     if p.endswith('.gyml'):
         p = p[:-5] + '.bgyml'
     return p
+
+
+def level_terrain(romfs, level):
+    """[terrain scene, x, y, z] of a level (GameBancParam TerrainSceneName and TerrainScenePosition, following
+    $parent), or None."""
+    name, pos, seen = None, None, set()
+    p = os.path.join(romfs, 'Banc', 'GameBancParam', level + '.game__banc__GameBancParam.bgyml')
+    while p and p not in seen and os.path.exists(p):
+        seen.add(p)
+        try:
+            b = byml.parse(open(p, 'rb').read()) or {}
+        except Exception:  # noqa: BLE001 - unreadable settings: no terrain
+            break
+        if name is None and 'TerrainSceneName' in b:
+            name = b['TerrainSceneName']
+        if pos is None and isinstance(b.get('TerrainScenePosition'), dict):
+            pos = [float(b['TerrainScenePosition'].get(k, 0.0)) for k in 'XYZ']
+        parent = b.get('$parent')
+        p = os.path.join(romfs, *ref_path(parent).split('/')) if parent else None
+    if not name:
+        return None
+    return [name] + (pos or [0.0, 0.0, 0.0])
 
 
 def actor_model(rd, actor, models):
@@ -136,7 +159,7 @@ def main(romfs, out, only=None):
     rd = Reader(romfs)
     models = {f[:-9] for f in os.listdir(os.path.join(romfs, 'Model')) if f.endswith('.bfres.zs')}
     banc = os.path.join(romfs, 'Banc')
-    levels, actor_models, actor_shapes_ = {}, {}, {}
+    levels, actor_models, actor_shapes_, terrain = {}, {}, {}, {}
     files = [(area, f) for area in sorted(os.listdir(banc)) if os.path.isdir(os.path.join(banc, area))
              for f in sorted(os.listdir(os.path.join(banc, area))) if f.endswith('.bcett.byml.zs')]
     for i, (area, f) in enumerate(files):
@@ -152,6 +175,8 @@ def main(romfs, out, only=None):
             print('skipped %s/%s: %s' % (area, f, e), flush=True)
             continue
         rows = levels.setdefault(area + '/' + level, [])
+        if area + '/' + level not in terrain:
+            terrain[area + '/' + level] = level_terrain(romfs, level)
         for a in (root or {}).get('Actors') or []:
             name = a.get('Gyaml')
             if not name:
@@ -166,7 +191,8 @@ def main(romfs, out, only=None):
             print('%d/%d levels files, %d actors' % (i, len(files), len(actor_models)), flush=True)
     tmp = out + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as fp:
-        json.dump({'version': 2, 'romfs': os.path.abspath(romfs), 'levels': levels, 'models': actor_models, 'shapes': actor_shapes_}, fp, separators=(',', ':'))
+        json.dump({'version': 3, 'romfs': os.path.abspath(romfs), 'levels': levels, 'models': actor_models, 'shapes': actor_shapes_,
+                   'terrain': {k: v for k, v in terrain.items() if v}}, fp, separators=(',', ':'))
     os.replace(tmp, out)
     print('done: %d levels, %d actors, %d with a model' % (len(levels), len(actor_models),
                                                          sum(1 for v in actor_models.values() if v)))

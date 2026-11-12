@@ -3,6 +3,7 @@
 #   zs_helper.py d <romfs> <in.zs> <out.bin>          decompress; prints the index of the dictionary used (-1: none)
 #   zs_helper.py c <romfs> <in.bin> <out.zs> <dict>   compress with that dictionary index (-1: none)
 #   zs_helper.py D <romfs> <list.txt> <unused>        decompress many: each line of list.txt is <in.zs>TAB<out.bin>
+#                                                     (also TerrainArc tiles: a 'TARB' header before the zstd frame)
 import os, struct, sys
 from compression import zstd
 
@@ -22,12 +23,16 @@ if mode == 'D':   # many files in one run (the Levels tab loads hundreds of mode
         a, _, b = line.partition(chr(9))
         try:
             raw = open(a, 'rb').read()
+            if raw[:4] == b'TARB':   # terrain tiles (TerrainArc): a small header, then a plain zstd frame
+                raw = raw[struct.unpack_from('<H', raw, 10)[0]:]
             d = by_id.get(zstd.get_frame_info(raw).dictionary_id)
             open(b, 'wb').write(zstd.decompress(raw, zstd_dict=d) if d else zstd.decompress(raw))
         except (OSError, zstd.ZstdError) as e:
             print('%s: %s' % (a, e), file=sys.stderr)
     sys.exit(0)
 raw = open(src, 'rb').read()
+if raw[:4] == b'TARB':   # a terrain tile
+    raw = raw[struct.unpack_from('<H', raw, 10)[0]:]
 if mode == 'd':
     # A frame made without a dictionary also decodes with one, so try none first: such files (the resource size table, read
     # at boot before the dictionaries are loaded) must be written back without a dictionary.

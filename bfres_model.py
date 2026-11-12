@@ -30,6 +30,7 @@ LAYOUTS = {0x02: (1, 8), 0x09: (2, 8), 0x0B: (4, 8), 0x0A: (1, 16), 0x12: (2, 16
 
 
 COLLISION = '(collision shape)'   # material of stand-in meshes made from collision shapes: drawn plain grey
+TERRAIN = '(terrain heightmap)'   # material of the field ground made from the level's heightmaps: drawn plain earth colour
 CULL_SIGN = -1.0   # which screen winding faces the camera, for the collision shapes' winding
 
 
@@ -258,7 +259,7 @@ def render(model, textures, size=(512, 512), yaw=0.6, pitch=-0.25, highlight=Non
     for m in meshes:
         tex_name = highlight if highlight in m.textures else next((t for t in m.textures if t.endswith('_Alb')), None)
         tex = textures.get(tex_name) if tex_name else None
-        if tex_name is None and m.material != COLLISION:
+        if tex_name is None and m.material not in (COLLISION, TERRAIN):
             continue   # no colour texture (clear eye covers, shadow casters): not drawn
         dim = dim_others and highlight is not None and highlight not in m.textures
         if tint is not None and highlight is not None and not dim:
@@ -383,7 +384,7 @@ def _fill(ids, k, x, y, z, x0, y0, m, t, tex, dim, shade, W, H, zbuf, colour, vs
         th, tw = tex.shape[:2]
         rgb = tex[(np.mod(v, 1.0) * th).astype(np.int64) % th, (np.mod(u, 1.0) * tw).astype(np.int64) % tw, :3].astype(f32)
     else:
-        rgb = np.full((len(tri), 3), 170.0, f32)
+        rgb = np.full((len(tri), 3), 170.0, f32) if m.material != TERRAIN else np.tile(np.array([150.0, 142.0, 108.0], f32), (len(tri), 1))
     if dim:
         rgb = rgb.mean(1, keepdims=True) * 0.55 + 40
     if vshade is not None:

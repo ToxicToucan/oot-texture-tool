@@ -163,7 +163,7 @@ Paint lands in the texture at the spot under the brush, so anything that shares 
 3. **Click** a part: its texture is selected, and every place the level uses it turns gold. Export, import, recolour or paint it as usual; the level shows your change.
 4. **Show far scenery** adds the distant mountains and sky around outdoor levels.
 
-Some terrain pieces (room shells, cliffs) keep their mesh in a packed "taskmesh" form the tool can't read. Their collision stands in (their own shape, or else the level's static collision), plain grey and simpler than the real model, with the faces towards you left out so you can see into rooms. Field ground (heightmaps) isn't drawn yet, so open fields still show gaps.
+Some terrain pieces (room shells, cliffs) keep their mesh in a packed "taskmesh" form the tool can't read. Their collision stands in (their own shape, or else the level's static collision), plain grey and simpler than the real model, with the faces towards you left out so you can see into rooms. The ground of fields, towns and some dungeons comes from the level's heightmaps (`TerrainArc`), in a plain earth colour (its materials aren't drawn). **Show ground** turns it off, for dungeons where it covers the rooms; far-off ground shows only with **Show far scenery**.
 
 ![Kakariko Village in the Levels tab, with the stairs texture shown in gold](docs/screenshot-level.png)
 
@@ -352,6 +352,7 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 - `level_view.py` moves each model into place and merges parts that share a material, keeping which object each triangle came from so clicks can name it. While you move the view it draws a coarse copy (vertices snapped to a grid), then the full level when you stop.
 - Terrain pieces stored as "taskmesh" (a packed meshlet form) are drawn from their collision shape instead. The level list follows each object's `PhysicsParam` to `ControllerSetParam` to `ShapeParam` to the `.phsh` mesh. `phive_shape.py` reads that Havok tagfile: the item index finds the geometry sections, each with 4-index primitives (a triangle when the last two match) and 16-bit vertices: (section offset + value) / 512.
 - Pieces with no shape of their own come from the level's static collision (`Phive/StaticCompoundBody/<area>/<level>[_X*_Z*].bphsc`): several tagfiles, each an `hknpCompoundShape` of instances (quaternion, position, scale, shape: mesh, convex hull, box or nested compound) in world space. A table in the file's header maps each actor's layout `Hash` to its bodies, and each body to an instance number.
+- The ground: `Banc/GameBancParam/<level>` names the level's terrain (`TerrainSceneName`, `TerrainScenePosition`, following `$parent`). `TerrainArc/<scene>.tscb` lists quadtree tiles (centre, edge length, name; world scale and height scale in its header), and each `<tile>.hght` (a `TARB` header, then zstd) holds a 257 x 257 float32 heightmap in the game's block-linear texture layout (16 GOBs per block), rows along z. It matches Dodongo's Cavern's terrain collision to about 0.3 m.
 
 | File | Purpose |
 | --- | --- |
@@ -367,6 +368,7 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 | `byml.py`, `sarc.py` | Read BYML layout files and SARC packs |
 | `phive_shape.py` | Reads collision shapes, drawn grey for terrain whose own mesh can't be read |
 | `phive_compound.py` | Reads a level's static collision, for terrain pieces without a shape of their own |
+| `terrain.py` | Reads a level's heightmaps (`TerrainArc`) and builds its ground |
 | `texture_tests.py` | Regression checks (runs in a temporary folder): `py -3.12 texture_tests.py` |
 | `texconv.cpp`, `build-texconv.cmd` | The codec helper (ASTC decode; BC1, BC3, BC4, BC5, BC7 encode) and its build script |
 | `textures/` | The `astc2bc7` library that `texconv` links (ASTC decode, BC7 encode) |

@@ -21,6 +21,15 @@ def is_far(row):
     return bool(FAR.search(row[0]))
 
 
+def play_area(rows, margin=0.25):
+    """(x0, z0, x1, z1) around where most of the level's objects stand (3rd to 97th percentile, widened by margin of
+    its size and 20 m), for leaving out the distant ground."""
+    at = np.array([r[2:5] for r in rows if r[1] and not is_far(r)] or [[0, 0, 0]], np.float32)
+    lo, hi = np.percentile(at, 3, 0), np.percentile(at, 97, 0)
+    pad = (hi - lo) * margin + 20
+    return (float(lo[0] - pad[0]), float(lo[2] - pad[2]), float(hi[0] + pad[0]), float(hi[2] + pad[2]))
+
+
 def placement(row):
     """(rotation 3x3, scale (3,), translation (3,)) for an index row."""
     rx, ry, rz = row[5:8]
@@ -29,17 +38,22 @@ def placement(row):
 
 def build(name, rows, get_model, skip=None, world=None):
     """A Model of the whole level. get_model(model name) -> bfres_model.Model or None. skip(row) -> True leaves a row
-    out. world: {row number: [(positions, triangles)]} already in place (the level's own collision for terrain), drawn
-    plain grey instead of the row's model. The result has .rows (the index rows), .centre and .radius (for the camera)."""
+    out. world: {row number: [(positions, triangles[, normals, material])]} already in place (the level's own collision
+    for terrain, drawn plain grey, or the heightmap ground), drawn instead of the row's model. The result has .rows (the index rows), .centre and .radius (for the camera)."""
     groups = {}
     for i, row in enumerate(rows):
-        if not row[1] or (skip and skip(row)):
+        if skip and skip(row):
             continue
         if world and world.get(i):
-            for pos, tris in world[i]:
+            for part in world[i]:
+                pos, tris = part[:2]
+                nrm = part[2] if len(part) > 2 else np.zeros_like(pos, np.float32)
+                mat = part[3] if len(part) > 3 else bfres_model.COLLISION
                 if len(tris):
-                    groups.setdefault(((), bfres_model.COLLISION), []).append(
-                        (pos.astype(np.float32), np.zeros((len(pos), 2), np.float32), np.zeros_like(pos, np.float32), tris, i))
+                    groups.setdefault(((), mat), []).append(
+                        (pos.astype(np.float32), np.zeros((len(pos), 2), np.float32), nrm.astype(np.float32), tris, i))
+            continue
+        if not row[1]:
             continue
         m = get_model(row[1])
         if m is None:

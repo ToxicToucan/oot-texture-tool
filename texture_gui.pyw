@@ -390,10 +390,10 @@ class Backend:
             return self._levels
         try:
             j = json.load(open(os.path.join(os.path.dirname(self.index_path), 'level_index.json'), encoding='utf-8'))
-            if norm(j['romfs']) != norm(self.cfg['romfs']) or j.get('version', 1) < 2:
-                return None   # another romfs, or an older list (no collision shapes or actor hashes): rebuilt
+            if norm(j['romfs']) != norm(self.cfg['romfs']) or j.get('version', 1) < 3:
+                return None   # another romfs, or an older list (no collision shapes, actor hashes or terrain): rebuilt
             self._levels = j['levels']
-            self._actor_shapes, self._actor_models = j['shapes'], j['models']
+            self._actor_shapes, self._actor_models, self._terrain = j['shapes'], j['models'], j.get('terrain', {})
             return self._levels
         except (OSError, ValueError, KeyError):
             return None
@@ -421,9 +421,10 @@ class Backend:
             subprocess.run(tt.PY_ZSTD + ['-I', os.path.join(HERE, 'zs_helper.py'), 'D', tt.game_romfs(None), lst, '-'],
                            capture_output=True, text=True, creationflags=NO_WINDOW)
 
-    def load_level(self, name, say=lambda text: None, far=False):
+    def load_level(self, name, say=lambda text: None, far=False, ground=True):
         """(level model, light copy for moving, {texture: RGBA array}) for a level of the level list. far: include the
-        distant scenery (mountains, far-off towns) that surrounds outdoor levels."""
+        distant scenery (mountains, far-off towns) that surrounds outdoor levels. ground: draw the field ground from the
+        level's heightmaps."""
         import bfres_model
         import level_view
         rows = (self.level_index() or {}).get(name)
@@ -462,12 +463,52 @@ class Backend:
                         g = c.shapes_for(rows[i][11], rows[i][2:5])
                         if g:
                             world[i] = g
+        # the field ground, from the level's heightmaps: one extra row, so a click on it names it
+        if ground and self._terrain.get(name):
+            g = self.level_ground(name, say, None if far else level_view.play_area(rows))
+            if g is not None and len(g[1]):
+                scene, x, y, z = self._terrain[name]
+                rows = list(rows) + [['Ground (heightmap %s)' % scene, '', x, y, z, 0, 0, 0, 1, 1, 1, 0]]
+                world[len(rows) - 1] = [(g[0], g[1], g[2], bfres_model.TERRAIN)]
         say('Putting %s together...' % name)
         model = level_view.build(name, rows, lambda m: cache[m] if cache.get(m) is not None and cache[m].meshes else stand.get(m), skip,
                                  world)
         say('Reading the textures of %s...' % name)
         tex = self.level_textures(model, say)
         return model, level_view.light(model), tex
+
+    def level_ground(self, name, say=lambda text: None, clip=None):
+        """(positions, triangles, normals) of a level's field ground from its heightmaps (TerrainArc), or None. clip:
+        (x0, z0, x1, z1) keeps only the ground there."""
+        import terrain
+        cache = getattr(self, '_ground', None)
+        if cache is None:
+            cache = self._ground = {}
+        key = (name, clip)
+        if key in cache:
+            return cache[key]
+        scene, x, y, z = self._terrain[name]
+        arc = os.path.join(self.cfg['romfs'], 'TerrainArc')
+        try:
+            scale, height, tiles = terrain.read_tscb(open(os.path.join(arc, scene + '.tscb'), 'rb').read())
+        except (OSError, ValueError, struct.error):
+            cache[key] = None
+            return None
+        have = [t for t in tiles if os.path.exists(os.path.join(arc, scene, t[3] + '.hght'))]
+        say('Reading %d heightmap tiles of %s...' % (len(have), scene))
+        parts = []
+        with tempfile.TemporaryDirectory() as tmp:
+            pairs = [(os.path.join(arc, scene, t[3] + '.hght'), os.path.join(tmp, '%d.bin' % i)) for i, t in enumerate(have)]
+            self.unzs_many(pairs)
+            for t, (_, out) in zip(have, pairs):
+                try:
+                    parts.append((t[0], t[1], t[2], terrain.heights(open(out, 'rb').read())))
+                except (OSError, ValueError):
+                    pass
+        g = terrain.ground(parts, scale, height, (x, y, z), 65 if len(parts) <= 60 else 33, clip) if parts else None
+        cache.clear()   # one level at a time
+        cache[key] = g
+        return g
 
     def level_collision(self, name):
         """phive_compound.Collision for each part of a level's static collision (Phive/StaticCompoundBody/<area>/
@@ -731,6 +772,9 @@ class App:
         self.lcount.pack(side='left')
         self.far = tk.BooleanVar(value=False)
         ttk.Checkbutton(ltab, text='Show far scenery (distant mountains, sky)', variable=self.far,
+                        command=lambda: self.level and self.open_level(self.level)).pack(anchor='w', side='bottom')
+        self.ground = tk.BooleanVar(value=True)
+        ttk.Checkbutton(ltab, text='Show ground (heightmaps)', variable=self.ground,
                         command=lambda: self.level and self.open_level(self.level)).pack(anchor='w', side='bottom')
         llist = ttk.Frame(ltab)
         llist.pack(fill='both', expand=True)
@@ -1175,7 +1219,9 @@ class App:
         if not self.level or self.view.get() != 'model' or self.painting.get():
             return
         hit = self.pick_owner(e.x, e.y)
-        if hit is not None:
+        if hit is not None and not self.mdl.rows[hit][1]:
+            self.say('That is the ground; double-click an object to centre on it.')
+        elif hit is not None:
             import numpy as np
             row = self.mdl.rows[hit]
             self.level_pan = np.array(row[2:5], np.float32)
@@ -1313,6 +1359,7 @@ class App:
 
     def pick_at(self, x, y):
         """Click on the model: select the texture of the part under the mouse (the reverse lookup)."""
+        import bfres_model
         hit = self.pick(x, y)
         if hit is None:
             return
@@ -1324,9 +1371,14 @@ class App:
         owner = self.pick_owner(x, y) if self.level else None
         if owner is not None:
             row = self.mdl.rows[owner]
-            if not mesh.textures:
+            if mesh.material == bfres_model.TERRAIN:
+                listing = 'no texture (the ground is drawn from its heightmaps, without its materials)'
+            elif not mesh.textures:
                 listing = 'no texture (terrain shown by its collision shape)'
-            self.level_note = '%s (model %s) at %.0f, %.0f, %.0f uses %s' % (row[0], row[1], row[2], row[3], row[4], listing)
+            if not row[1]:   # the ground
+                self.level_note = '%s: %s' % (row[0], listing)
+            else:
+                self.level_note = '%s (model %s) at %.0f, %.0f, %.0f uses %s' % (row[0], row[1], row[2], row[3], row[4], listing)
             self.say(self.level_note)
             if tex and tex != hl:
                 self.select_texture(tex)
@@ -1565,7 +1617,7 @@ class App:
             return
 
         def job():
-            return self.be.load_level(name, lambda text: setattr(self, 'progress', text), self.far.get())
+            return self.be.load_level(name, lambda text: setattr(self, 'progress', text), self.far.get(), self.ground.get())
 
         def done(res, err):
             if err:
@@ -1583,12 +1635,12 @@ class App:
             self.bmexp.config(state='normal')
             self.bobj.config(state='disabled')
             self.title.config(text=name)
-            rows = self.mdl.rows
-            shown = len({int(o) for m in self.mdl.meshes for o in numpy.unique(m.owner)})
+            placed = len(self.be.level_index()[name])   # the ground's row comes after the placed actors
+            shown = len({int(o) for m in self.mdl.meshes for o in numpy.unique(m.owner)} - {placed})
             ntri = sum(len(m.tris) for m in self.mdl.meshes)
             self.details.config(text='%d placed actors, %d drawn (%d triangles); %d textures.\n'
-                                     'Plain grey: terrain shown by its collision shape. Field ground (heightmaps) is not drawn yet.' % (
-                                         len(rows), shown, ntri, len(self.mdl_tex)))
+                                     'Plain grey: terrain shown by its collision shape. Earth colour: the ground, from its heightmaps.' % (
+                                         placed, shown, ntri, len(self.mdl_tex)))
             self.canimport.config(text='')
             self.draw()
             self.say('%s. Drag to turn, wheel to zoom, middle-drag or Shift+drag to move, double-click to centre on a '

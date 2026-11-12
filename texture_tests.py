@@ -185,6 +185,16 @@ def levels(work):
     near = all(numpy.linalg.norm((g[0][0].min(0) + g[0][0].max(0)) / 2 - numpy.array(r[2:5])) < 200 for r, g in found)
     check(len(found) >= 3 and near, 'DinolfosStage static collision: %d actors placed, %d triangles' % (
         len(found), sum(len(t) for r, g in found for p, t in g)))
+    # the ground: Dodongo's Cavern's top heightmap tile reaches 104.8 m, as its terrain collision does
+    import terrain
+    arc = os.path.join(ROMFS, 'TerrainArc')
+    scale, height, tiles = terrain.read_tscb(open(os.path.join(arc, 'DodongoCavern_01.tscb'), 'rb').read())
+    with tempfile.TemporaryDirectory() as tmp:
+        data, _ = tt.unzs(os.path.join(arc, 'DodongoCavern_01', '1000000000.hght'), ROMFS, tmp)
+    h = terrain.heights(data) * height
+    pos, tris, nrm = terrain.ground([(0.0, 0.0, 1.0, h / height)], scale, height, (32, 0, -21))
+    check(scale == 250 and len(tiles) == 85 and abs(float(h.max()) - 104.8) < 0.2 and len(tris) > 1000,
+          'DodongoCavern_01 heightmap: %d tiles, top tile up to %.1f m, %d ground triangles' % (len(tiles), h.max(), len(tris)))
     light = level_view.light(lv, 100)
     check(0 < level_view.stats(light)[1] < level_view.stats(lv)[1], 'light copy: %d of %d triangles' % (
         level_view.stats(light)[1], level_view.stats(lv)[1]))
