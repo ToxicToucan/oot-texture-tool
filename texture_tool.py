@@ -5,6 +5,8 @@
   python texture_tool.py import <romfs\\Tex\\name.bntx.zs> <edited.png> <mod folder>
 
 export: the texture's full-size image (mip 0) as a PNG. ASTC and BC1..BC7 textures.
+sizes:  python texture_tool.py sizes <mods folder>   rebuilds the merged resource size table for all mods.
+
 import: the PNG (same size as the texture) back into a copy of the texture under <mod folder>\\romfs\\Tex\\, every mip level
         made from it, for the menu's Mods tab. This version imports into BC7 textures (the file keeps its size, so the game's
         resource size table needs no change); ASTC textures are exported fine but not yet imported.
@@ -201,6 +203,149 @@ def export_png(src, png):
     return t
 
 
+def align(v, a):
+    return (v + a - 1) // a * a
+
+
+def to_bc7_layout(t):
+    """An ASTC texture's container rebuilt for BC7: the same size and mip levels, BC7 (sRGB kept), each level laid out
+    block-linear at 512-byte offsets; the data block, the relocation table after it and the header fields that point at
+    them are moved to match. The new mip data is zeros (import_png fills it). Returns the new Texture."""
+    d = t.d
+    brtd = d.find(b'BRTD')
+    old_brtd_size = struct.unpack_from('<Q', d, brtd + 8)[0]
+    rlt = struct.unpack_from('<I', d, 0x18)[0]
+    rlt_block = bytes(d[rlt:])
+    head = bytearray(d[:t.data_start])
+    t.kind, t.bw, t.bh, t.bpb = 0x20, 4, 4, 16
+    offsets, pos = [], t.data_start
+    for m in range(t.mips):
+        w, h, wb, hb = t.mip_dims(m)
+        g = t.gobs_y(m)
+        size = ((wb * 16 + 63) // 64) * 512 * g * ((hb + 8 * g - 1) // (8 * g))
+        offsets.append(pos)
+        pos = align(pos + size, 512)
+    data_size = pos - t.data_start
+    new_rlt = align(t.data_start + data_size, 0x1000)
+    new_brtd_size = new_rlt - brtd
+    i = t.brti
+    struct.pack_into('<I', head, i + 0x1C, (0x20 << 8) | (t.fmt & 0xff))
+    struct.pack_into('<I', head, i + 0x50, data_size)
+    ptrs = struct.unpack_from('<Q', head, i + 0x70)[0]
+    for k, o in enumerate(offsets):
+        struct.pack_into('<Q', head, ptrs + 8 * k, o)
+    struct.pack_into('<Q', head, brtd + 8, new_brtd_size)
+    struct.pack_into('<I', head, 0x18, new_rlt)
+    struct.pack_into('<I', head, 0x1C, new_rlt + len(rlt_block))
+    rb = bytearray(rlt_block)
+    struct.pack_into('<I', rb, 4, new_rlt)
+    for sec in range(struct.unpack_from('<I', rb, 8)[0]):
+        at = 0x10 + sec * 0x18
+        if struct.unpack_from('<I', rb, at + 8)[0] == brtd and struct.unpack_from('<I', rb, at + 12)[0] == old_brtd_size:
+            struct.pack_into('<I', rb, at + 12, new_brtd_size)
+    out = head + bytes(new_rlt - t.data_start) + rb
+    nt = Texture(out)
+    if nt.kind != 0x20 or nt.mip_offsets != offsets:
+        raise ToolError('the BC7 layout could not be written')
+    return nt
+
+
+# ---- the game's resource size table (System/Resource/ResourceSizeTable...rsizetable.zs) ----
+# "RESTBL", version, name length (160), CRC entry count, name entry count; then (CRC32 of the path without .zs, size) sorted
+# by CRC, then (path, size) for paths whose CRC collides. The size a texture needs is its unpacked size + 280. A mod file
+# bigger than its entry is not loaded (or the load hangs), so grown entries are merged into one table for all mods
+# (the larger value per entry, as Hookshot's mod notes describe).
+RSTB_PATH = os.path.join('System', 'Resource', 'ResourceSizeTable.Product.111.Nin_Ounce_NVN2.rsizetable.zs')
+SIZE_MOD = '~Size table (made by the texture tool)'
+
+
+def rstb_read(data):
+    import zlib
+    if data[:6] != b'RESTBL':
+        raise ToolError('not a resource size table')
+    ver, namelen, ncrc, nname = struct.unpack_from('<IIII', data, 6)
+    crc = {}
+    at = 22
+    for _ in range(ncrc):
+        c, v = struct.unpack_from('<II', data, at)
+        crc[c] = v
+        at += 8
+    names = {}
+    for _ in range(nname):
+        n = data[at:at + namelen].split(b'\0', 1)[0].decode()
+        names[n] = struct.unpack_from('<I', data, at + namelen)[0]
+        at += namelen + 4
+    return ver, namelen, crc, names
+
+
+def rstb_write(ver, namelen, crc, names):
+    out = bytearray(b'RESTBL' + struct.pack('<IIII', ver, namelen, len(crc), len(names)))
+    for c in sorted(crc):
+        out += struct.pack('<II', c, crc[c])
+    for n in sorted(names):
+        out += n.encode().ljust(namelen, b'\0') + struct.pack('<I', names[n])
+    return bytes(out)
+
+
+def rstb_set(crc, names, path, size):
+    """Raises the entry of `path` (no .zs, '/' separators) to at least `size`. True when it changed."""
+    import zlib
+    if path in names:
+        if names[path] >= size:
+            return False
+        names[path] = size
+        return True
+    c = zlib.crc32(path.encode())
+    if crc.get(c, 0) >= size:
+        return False
+    crc[c] = size
+    return True
+
+
+def merge_sizes(mods_dir, romfs=None):
+    """One size table for every mod in mods_dir: the game's table, each mod's own table (larger values win) and the
+    unpacked size + 280 of each mod texture. Written as the mod SIZE_MOD (last in the load order by its name); removed
+    when nothing needs a larger entry. Returns the number of entries raised."""
+    romfs = romfs or game_romfs(None)
+    with tempfile.TemporaryDirectory() as tmp:
+        base, dict_index = unzs(os.path.join(romfs, RSTB_PATH), romfs, tmp)
+        ver, namelen, crc, names = rstb_read(base)
+        raised = 0
+        for mod in sorted(os.listdir(mods_dir)):
+            root = os.path.join(mods_dir, mod, 'romfs')
+            if mod == SIZE_MOD or not os.path.isdir(root):
+                continue
+            own = os.path.join(root, RSTB_PATH)
+            if os.path.exists(own):
+                _, _, mcrc, mnames = rstb_read(unzs(own, romfs, tmp)[0])
+                for c, v in mcrc.items():
+                    if crc.get(c, 0) < v:
+                        crc[c] = v
+                        raised += 1
+                for n, v in mnames.items():
+                    if names.get(n, 0) < v:
+                        names[n] = v
+                        raised += 1
+            for dirpath, _, files in os.walk(root):
+                for f in files:
+                    if not f.endswith('.bntx.zs'):
+                        continue
+                    full = os.path.join(dirpath, f)
+                    rel = os.path.relpath(full, root).replace(os.sep, '/')[:-3]
+                    raised += rstb_set(crc, names, rel, len(unzs(full, romfs, tmp)[0]) + 280)
+        out_dir = os.path.join(mods_dir, SIZE_MOD)
+        dst = os.path.join(out_dir, 'romfs', RSTB_PATH)
+        if raised:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            zs(rstb_write(ver, namelen, crc, names), romfs, dict_index, dst, tmp)
+            open(os.path.join(out_dir, 'README.txt'), 'w').write(
+                'Made by the texture tool: the game\'s resource size table with the entries the other mods need raised.\n'
+                'Keep it on and last in the Mods tab. The tool rebuilds it after each import.\n')
+        elif os.path.exists(dst):
+            os.remove(dst)
+    return raised
+
+
 def import_png(src, png, mod):
     from PIL import Image
     inside = find_romfs(src)
@@ -209,8 +354,10 @@ def import_png(src, png, mod):
     tmp0 = tmp_obj.name
     d, dct = unzs(src, romfs, tmp0)
     t = Texture(d)
-    if t.kind != 0x20:
-        raise ToolError('%s is %s: this version imports into BC7 textures only (export works for all)' %
+    if t.kind in ASTC_BLOCKS:
+        t = to_bc7_layout(t)   # ASTC: the mod's copy becomes BC7 (bigger, so the size table is raised below)
+    elif t.kind != 0x20:
+        raise ToolError('%s is %s: imports go into BC7 and ASTC textures (export works for all)' %
                          (os.path.basename(src), format_name(t)))
     img = Image.open(png).convert('RGBA')
     if img.size != (t.w, t.h):
@@ -236,6 +383,9 @@ def import_png(src, png, mod):
     zs(bytes(t.d), romfs, dct, dst, tmp0)
     tmp_obj.cleanup()
     print('%s: %d mip levels encoded as BC7 -> %s' % (os.path.basename(src), t.mips, dst))
+    raised = merge_sizes(os.path.dirname(os.path.abspath(mod)), romfs)
+    if raised:
+        print('size table: %d entries raised in "%s" (keep that mod on and last)' % (raised, SIZE_MOD))
     return dst
 
 
@@ -245,6 +395,8 @@ if __name__ == '__main__':
             export_png(sys.argv[2], sys.argv[3])
         elif len(sys.argv) == 5 and sys.argv[1] == 'import':
             import_png(sys.argv[2], sys.argv[3], sys.argv[4])
+        elif len(sys.argv) == 3 and sys.argv[1] == 'sizes':
+            print('size table: %d entries raised' % merge_sizes(sys.argv[2]))
         else:
             print(__doc__)
             sys.exit(2)

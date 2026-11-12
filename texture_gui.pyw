@@ -25,6 +25,8 @@ import texture_tool as tt  # noqa: E402
 
 # texture_tool reports problems with SystemExit, or ToolError in newer versions
 TOOL_ERRORS = (SystemExit,) + ((tt.ToolError,) if hasattr(tt, "ToolError") else ())
+ASTC_IMPORT = hasattr(tt, 'to_bc7_layout')          # ASTC textures are imported as BC7
+SIZE_MOD = getattr(tt, 'SIZE_MOD', None)            # the mod holding the merged resource size table
 
 CONFIG = os.path.join(os.environ.get('LOCALAPPDATA', HERE), 'oot-texture-gui.json')
 DEFAULTS = {
@@ -167,11 +169,10 @@ class Backend:
         astc = t.kind in tt.ASTC_BLOCKS
         info = {'name': name, 'w': t.w, 'h': t.h, 'mips': t.mips, 'srgb': t.srgb,
                 'format': ('ASTC %dx%d' % (t.bw, t.bh)) if astc else tt.BC[t.kind][0],
-                'importable': t.kind == 0x20}
+                'importable': t.kind == 0x20 or (astc and ASTC_IMPORT), 'astc': astc}
         if not info['importable']:
-            info['why_not'] = ('ASTC textures export fine but cannot be imported yet (that needs the resource size table '
-                               'change, coming later).' if astc else
-                               '%s textures cannot be imported yet; only BC7 can.' % info['format'])
+            info['why_not'] = ('ASTC textures export fine but this version cannot import them.' if astc else
+                               '%s textures cannot be imported yet; only BC7%s can.' % (info['format'], ' and ASTC' if ASTC_IMPORT else ''))
         return info, img
 
     def export(self, name, png):
@@ -182,9 +183,24 @@ class Backend:
 
     def mods(self):
         try:
-            return sorted((d for d in os.listdir(self.cfg['mods']) if os.path.isdir(os.path.join(self.cfg['mods'], d))), key=str.lower)
+            return sorted((d for d in os.listdir(self.cfg['mods']) if os.path.isdir(os.path.join(self.cfg['mods'], d))
+                           and d != SIZE_MOD), key=str.lower)   # the size table mod is the tool's own, not a place for textures
         except OSError:
             return []
+
+    def size_mod_exists(self):
+        return bool(SIZE_MOD) and os.path.isdir(os.path.join(self.cfg['mods'], SIZE_MOD))
+
+    def rebuild_sizes(self):
+        """Rebuild the merged resource size table for all mods (after a mod was removed or edited by hand)."""
+        if not hasattr(tt, 'merge_sizes'):
+            raise ToolError('This version of texture_tool.py has no size table support.')
+        mods = self.cfg['mods']
+        self.safe_mod_dir(SIZE_MOD)   # the same folder checks as an import
+        try:
+            return tt.merge_sizes(mods, self.cfg['romfs'])
+        except TOOL_ERRORS as e:
+            raise ToolError(str(e))
 
     def mod_state(self, mod):
         """'on', 'off' or 'not listed' from mods.ini (the Mods tab writes it)."""
@@ -232,6 +248,8 @@ class Backend:
 
     def do_import(self, info, png, mod):
         self.check_import(info, png)
+        if SIZE_MOD and mod.lower() == SIZE_MOD.lower():
+            raise ToolError('"%s" is kept by the tool for the size table. Pick another mod name.' % SIZE_MOD)
         dst = self.safe_mod_dir(mod)
         os.makedirs(dst, exist_ok=True)
         try:
@@ -272,6 +290,8 @@ class App:
         self.count.pack(side='left')
         ttk.Button(top, text='Settings...', command=self.settings).pack(side='right')
         ttk.Button(top, text='Open mods folder', command=self.open_mods).pack(side='right', padx=4)
+        if SIZE_MOD:
+            ttk.Button(top, text='Rebuild size table', command=self.rebuild_sizes).pack(side='right')
 
         body = ttk.PanedWindow(root, orient='horizontal')
         body.pack(fill='both', expand=True, padx=8, pady=8)
@@ -403,7 +423,10 @@ class App:
         self.details.config(text='Format: %s%s\nSize: %d x %d\nMip levels: %d%s' % (
             info['format'], ' (sRGB)' if info['srgb'] else '', info['w'], info['h'], info['mips'],
             '' if scale == 1 else '   (preview at %d%%)' % round(scale * 100)))
-        if info['importable']:
+        if info['importable'] and info['astc']:
+            self.canimport.config(text='Can be imported: yes. The mod\'s copy is saved as BC7 (a bigger file); the tool '
+                                       'raises the game\'s size table to match, in the mod "%s".' % SIZE_MOD, foreground='#060')
+        elif info['importable']:
             self.canimport.config(text='Can be imported: yes (BC7).', foreground='#060')
         else:
             self.canimport.config(text='Can be imported: not yet. ' + info['why_not'], foreground='#a50')
@@ -495,9 +518,31 @@ class App:
                    'off': 'It is turned OFF: turn it on in the game\'s Mods tab, then restart the game.'}.get(
                 state, 'Turn it on in the game\'s Mods tab (menu), then restart the game.')
             self.say('Imported %s into mod "%s"' % (info['name'], mod))
-            messagebox.showinfo('Imported', 'Done. Wrote:\n%s\n\n%s' % (path, how), parent=self.root)
+            messagebox.showinfo('Imported', 'Done. Wrote:\n%s\n\n%s%s' % (path, how, self.size_note()), parent=self.root)
         self.work('Importing into %s (encoding every mip level, this can take a little while)...' % mod,
                   lambda: self.be.do_import(info, png, mod), done)
+
+    def size_note(self):
+        """What to do about the size table mod, if there is one."""
+        if not self.be.size_mod_exists():
+            return ''
+        state = self.be.mod_state(SIZE_MOD)
+        return ('\n\nThe size table mod "%s" was updated. Keep it %s last in the Mods tab.'
+                % (SIZE_MOD, 'on and' if state == 'on' else 'turned ON and'))
+
+    def rebuild_sizes(self):
+        if self.busy:
+            return
+
+        def done(raised, err):
+            if err:
+                self.error('Size table not rebuilt', err)
+                return
+            self.say('Size table rebuilt: %d entries raised' % raised)
+            msg = ('Rebuilt: %d entries raised for the mods in\n%s' % (raised, self.cfg['mods']) if raised else
+                   'No mod needs a bigger size table entry, so no size table mod is needed.')
+            messagebox.showinfo('Size table', msg + self.size_note(), parent=self.root)
+        self.work('Rebuilding the size table for every mod...', self.be.rebuild_sizes, done)
 
     def open_mods(self):
         d = self.cfg['mods']

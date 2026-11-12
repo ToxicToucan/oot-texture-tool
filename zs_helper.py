@@ -17,6 +17,14 @@ mode, romfs, src, dst = sys.argv[1:5]
 dicts = [zstd.ZstdDict(d) for d in sarc_files(zstd.decompress(open(os.path.join(romfs, 'Pack', 'ZsDic.pack.zs'), 'rb').read()))]
 raw = open(src, 'rb').read()
 if mode == 'd':
+    # A frame made without a dictionary also decodes with one, so try none first: such files (the resource size table, read
+    # at boot before the dictionaries are loaded) must be written back without a dictionary.
+    try:
+        open(dst, 'wb').write(zstd.decompress(raw))
+        print(-1)
+        sys.exit(0)
+    except zstd.ZstdError:
+        pass
     for i, d in enumerate(dicts):
         try:
             open(dst, 'wb').write(zstd.decompress(raw, zstd_dict=d))
