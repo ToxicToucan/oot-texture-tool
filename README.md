@@ -193,6 +193,7 @@ Some terrain pieces (room shells, cliffs) keep their mesh in a packed "taskmesh"
 | Mods folder | Where mods are written. | `C:\Switch2\oot-recomp-probe\merged\mods` |
 | Folder with texconv.exe | Where `texconv.exe` and its DLLs are. | The tool's own folder |
 | Python 3.14+ command | Runs the zstd step. | `py -3.15` |
+| Look | Dark (One Dark colours) or Light (the Windows look). Switches at once. | Dark |
 
 The settings are saved in `%LOCALAPPDATA%\oot-texture-gui.json`.
 

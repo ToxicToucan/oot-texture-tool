@@ -39,7 +39,107 @@ DEFAULTS = {
     'texconv_dir': os.environ.get('TEXCONV_DIR', HERE),
     'py_zstd': os.environ.get('PY_ZSTD', 'py -3.15'),
     'last_dir': os.path.expanduser('~'),
+    'theme': 'dark',
 }
+
+# Colours. "dark" follows the One Dark Pro editor theme; "light" is the plain Windows look.
+THEMES = {
+    'dark': {'bg': '#282c34', 'panel': '#21252b', 'field': '#1e2227', 'fg': '#abb2bf', 'muted': '#7f848e',
+             'select': '#3e4451', 'accent': '#61afef', 'border': '#181a1f', 'hover': '#2c313a', 'button': '#333842',
+             'red': '#e06c75', 'green': '#98c379', 'yellow': '#e5c07b', 'view': '#1e2227',
+             'board': ((52, 56, 64), (40, 44, 52))},
+    'light': {'bg': None, 'panel': None, 'field': 'white', 'fg': 'black', 'muted': '#555', 'select': '#0078d7',
+              'accent': '#0078d7', 'border': '#aaa', 'hover': None, 'button': None, 'red': '#a00', 'green': '#060',
+              'yellow': '#a50', 'view': '#dddddd', 'board': ((200, 200, 200), (150, 150, 150))},
+}
+T = dict(THEMES['dark'])
+
+
+def hex_rgb(c):
+    c = c.lstrip('#')
+    if len(c) == 3:
+        c = ''.join(x * 2 for x in c)
+    return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def apply_theme(root, name):
+    """Style every ttk widget (and tk defaults for lists, dialogs and menus) in the named theme; returns its colours."""
+    T.clear()
+    T.update(THEMES.get(name, THEMES['dark']))
+    style = ttk.Style(root)
+    if T['bg'] is None:   # light: the Windows look
+        if 'vista' in style.theme_names():
+            style.theme_use('vista')
+        for k in ('*Listbox.background', '*Listbox.foreground', '*Listbox.selectBackground', '*Listbox.selectForeground',
+                  '*TCombobox*Listbox.background', '*TCombobox*Listbox.foreground'):
+            root.option_add(k, {'background': 'white', 'foreground': 'black', 'selectBackground': '#0078d7',
+                                'selectForeground': 'white'}[k.split('.')[-1]])
+        return T
+    bg, panel, field, fg, muted, sel, acc, border, hover, button = (T[k] for k in (
+        'bg', 'panel', 'field', 'fg', 'muted', 'select', 'accent', 'border', 'hover', 'button'))
+    style.theme_use('clam')
+    style.configure('.', background=bg, foreground=fg, fieldbackground=field, bordercolor=border, darkcolor=bg,
+                    lightcolor=bg, troughcolor=panel, focuscolor=acc, selectbackground=sel, selectforeground=fg,
+                    insertcolor=fg, arrowcolor=fg, font=('Segoe UI', 9))
+    style.map('.', foreground=[('disabled', muted)])
+    style.configure('TFrame', background=bg)
+    style.configure('TLabel', background=bg, foreground=fg)
+    style.configure('TButton', background=button, foreground=fg, bordercolor=border, padding=(8, 3))
+    style.map('TButton', background=[('disabled', bg), ('pressed', sel), ('active', hover)],
+              foreground=[('disabled', muted)], bordercolor=[('focus', acc)])
+    for w in ('TCheckbutton', 'TRadiobutton'):
+        style.configure(w, background=bg, foreground=fg, indicatorbackground=field, indicatorforeground=acc,
+                        indicatorsize=int(13 * root.winfo_fpixels('1i') / 96), indicatormargin=(0, 0, 5, 0))
+        style.map(w, background=[('active', bg)], indicatorbackground=[('selected', field), ('active', hover)],
+                  foreground=[('disabled', muted)])
+    style.configure('TEntry', fieldbackground=field, foreground=fg, bordercolor=border, insertcolor=fg)
+    style.map('TEntry', bordercolor=[('focus', acc)])
+    style.configure('TCombobox', fieldbackground=field, background=button, foreground=fg, arrowcolor=fg,
+                    bordercolor=border)
+    style.map('TCombobox', fieldbackground=[('readonly', field), ('disabled', bg)], foreground=[('disabled', muted)],
+              selectbackground=[('readonly', field)], selectforeground=[('readonly', fg)], bordercolor=[('focus', acc)])
+    style.configure('TNotebook', background=bg, bordercolor=border, tabmargins=(0, 2, 0, 0))
+    style.configure('TNotebook.Tab', background=panel, foreground=muted, bordercolor=border, padding=(10, 3))
+    style.map('TNotebook.Tab', background=[('selected', bg), ('active', hover)], foreground=[('selected', fg)],
+              lightcolor=[('selected', acc)])
+    style.configure('Vertical.TScrollbar', background=button, troughcolor=panel, bordercolor=panel, arrowcolor=fg)
+    style.map('Vertical.TScrollbar', background=[('active', sel)])
+    style.configure('Horizontal.TScale', background=button, troughcolor=panel, bordercolor=border)
+    style.configure('TLabelframe', background=bg, bordercolor=border)
+    style.configure('TLabelframe.Label', background=bg, foreground=fg)
+    root.configure(background=bg)
+    for k, v in (('*Listbox.background', field), ('*Listbox.foreground', fg), ('*Listbox.selectBackground', sel),
+                 ('*Listbox.selectForeground', '#ffffff'), ('*Listbox.highlightThickness', 0), ('*Listbox.borderWidth', 0),
+                 ('*TCombobox*Listbox.background', field), ('*TCombobox*Listbox.foreground', fg),
+                 ('*TCombobox*Listbox.selectBackground', sel), ('*Toplevel.background', bg),
+                 ('*Menu.background', panel), ('*Menu.foreground', fg), ('*Menu.activeBackground', sel),
+                 ('*Frame.background', bg), ('*Label.background', bg), ('*Label.foreground', fg),
+                 ('*Button.background', button), ('*Button.foreground', fg), ('*Button.activeBackground', hover),
+                 ('*Button.activeForeground', fg), ('*Button.highlightBackground', bg), ('*Button.relief', 'flat'),
+                 ('*Button.borderWidth', 1)):
+        root.option_add(k, v)
+    return T
+
+
+def list_colours():
+    if T['bg'] is None:
+        return {}
+    return {'background': T['field'], 'foreground': T['fg'], 'selectbackground': T['select'], 'selectforeground': '#ffffff',
+            'highlightthickness': 0, 'borderwidth': 0}
+
+
+def dark_title_bar(win, on=True):
+    """Windows 10/11: a dark title bar to match (DWMWA_USE_IMMERSIVE_DARK_MODE); ignored elsewhere."""
+    try:
+        import ctypes
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+        v = ctypes.c_int(1 if on else 0)
+        for attr in (20, 19):
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(v), ctypes.sizeof(v)) == 0:
+                break
+    except (AttributeError, OSError):
+        pass
 PREVIEW = 512
 NO_WINDOW = 0x08000000 if os.name == 'nt' else 0   # CREATE_NO_WINDOW: no console flashes for the helper programs
 
@@ -732,9 +832,8 @@ class App:
         f = root.winfo_fpixels('1i') / 96   # display scaling
         root.geometry('%dx%d' % (min(1000 * f, root.winfo_screenwidth() * 0.9), min(760 * f, root.winfo_screenheight() * 0.85)))
         root.minsize(int(760 * f), int(520 * f))
-        style = ttk.Style()
-        if 'vista' in style.theme_names():
-            style.theme_use('vista')
+        apply_theme(root, cfg.get('theme', 'dark'))
+        dark_title_bar(root, T['bg'] is not None)
 
         top = ttk.Frame(root, padding=(8, 8, 8, 0))
         top.pack(fill='x')
@@ -758,7 +857,7 @@ class App:
         body.pack(fill='both', expand=True, padx=8, pady=8)
         self.tabs = ttk.Notebook(body)
         left = ttk.Frame(self.tabs)
-        self.lb = tk.Listbox(left, activestyle='none', exportselection=False, font=('Segoe UI', 9))
+        self.lb = tk.Listbox(left, activestyle='none', exportselection=False, font=('Segoe UI', 9), **list_colours())
         sb = ttk.Scrollbar(left, orient='vertical', command=self.lb.yview)
         self.lb.config(yscrollcommand=sb.set)
         self.lb.pack(side='left', fill='both', expand=True)
@@ -777,7 +876,7 @@ class App:
         ttk.Button(mtop, text='Export (OBJ)...', command=lambda: self.export_model_obj(self.selected_list_model())).pack(side='left', padx=(4, 0))
         mlist = ttk.Frame(mtab)
         mlist.pack(fill='both', expand=True)
-        self.mlb = tk.Listbox(mlist, activestyle='none', exportselection=False, font=('Segoe UI', 9))
+        self.mlb = tk.Listbox(mlist, activestyle='none', exportselection=False, font=('Segoe UI', 9), **list_colours())
         msb = ttk.Scrollbar(mlist, orient='vertical', command=self.mlb.yview)
         self.mlb.config(yscrollcommand=msb.set)
         self.mlb.pack(side='left', fill='both', expand=True)
@@ -801,7 +900,7 @@ class App:
                         command=lambda: self.level and self.open_level(self.level)).pack(anchor='w', side='bottom')
         llist = ttk.Frame(ltab)
         llist.pack(fill='both', expand=True)
-        self.llb = tk.Listbox(llist, activestyle='none', exportselection=False, font=('Segoe UI', 9))
+        self.llb = tk.Listbox(llist, activestyle='none', exportselection=False, font=('Segoe UI', 9), **list_colours())
         lsb = ttk.Scrollbar(llist, orient='vertical', command=self.llb.yview)
         self.llb.config(yscrollcommand=lsb.set)
         self.llb.pack(side='left', fill='both', expand=True)
@@ -877,7 +976,7 @@ class App:
         self.bdel = ttk.Button(btns, text='Remove from mod', command=self.remove_copy, state='disabled')
         self.bdel.pack(side='left')
         self.canvas = tk.Canvas(right, width=int(PREVIEW * f), height=int(PREVIEW * f), highlightthickness=1,
-                                highlightbackground='#aaa', bg='#ddd')
+                                highlightbackground=T['border'], highlightcolor=T['border'], bg=T['view'])
         self.canvas.pack(fill='both', expand=True)
         self.canvas.bind('<Configure>', lambda _: self.draw())
         self.canvas.bind('<ButtonPress-1>', self.drag_start)
@@ -1023,7 +1122,7 @@ class App:
         self.canvas.delete('all')
         self.title.config(text=name[:-8])
         self.details.config(text='Could not read this texture.')
-        self.canimport.config(text=str(err), foreground='#a00')
+        self.canimport.config(text=str(err), foreground=T['red'])
         for b in (self.bexp, self.bdds, self.bimp, self.brec, self.bedit, self.bdel):
             b.config(state='disabled')
         self.say('Could not read %s' % name)
@@ -1042,11 +1141,11 @@ class App:
             info['w'], info['h'], info['mips'], '' if scale == 1 else '   (preview at %d%%)' % round(scale * 100)))
         if orig['importable'] and orig['astc']:
             self.canimport.config(text='Can be imported: yes. The mod\'s copy is saved as BC7 (a bigger file); the tool '
-                                       'raises the game\'s size table to match, in the mod "%s".' % SIZE_MOD, foreground='#060')
+                                       'raises the game\'s size table to match, in the mod "%s".' % SIZE_MOD, foreground=T['green'])
         elif orig['importable']:
-            self.canimport.config(text='Can be imported: yes (stays %s, same file size).' % orig['format'], foreground='#060')
+            self.canimport.config(text='Can be imported: yes (stays %s, same file size).' % orig['format'], foreground=T['green'])
         else:
-            self.canimport.config(text='Can be imported: no. ' + orig['why_not'], foreground='#a50')
+            self.canimport.config(text='Can be imported: no. ' + orig['why_not'], foreground=T['yellow'])
         labels = [v[0] for v in self.versions] if self.versions and self.versions[0][1] is None else ['Original (game)']
         self.vercb.config(values=labels, state='readonly' if len(labels) > 1 else 'disabled')
         current = next((v[0] for v in self.versions if v[1] == path), labels[0])
@@ -1304,7 +1403,7 @@ class App:
             msg = (self.model.get() or 'No model') if self.mdl is None else (
                 '%s keeps its meshes in a form this preview cannot read yet\n(terrain and some map pieces).\n'
                 'Pick another model from the list, or use the Texture view.' % self.mdl.name)
-            self.canvas.create_text(cw // 2, ch // 2, text=msg, fill='#555', justify='center')
+            self.canvas.create_text(cw // 2, ch // 2, text=msg, fill=T['muted'], justify='center')
             return 1
         import bfres_model
         tex = dict(self.mdl_tex)
@@ -1326,7 +1425,7 @@ class App:
         if self.level:   # levels: a fixed camera that the owner moves; a coarse copy while moving
             mdl = self.level_light if fast and self.level_light is not None else self.mdl
             frame = (self.level_pan, self.mdl.radius)
-        out, bufs = bfres_model.render(mdl, tex, (rw, rh), self.yaw, self.pitch, highlight=hl, zoom=self.zoom,
+        out, bufs = bfres_model.render(mdl, tex, (rw, rh), self.yaw, self.pitch, highlight=hl, zoom=self.zoom, bg=hex_rgb(T['view']),
                                        pick=True, dim_others=not self.painting.get(), frame=frame,
                                        tint=(255, 200, 40) if self.level and not self.painting.get() else None)
         self.pickbuf = (bufs, rw, rh, cw, ch)
@@ -1702,8 +1801,8 @@ class App:
         crop = img.crop((x0, y0, x1, y1))
         size = (max(1, round((x1 - x0) * scale)), max(1, round((y1 - y0) * scale)))
         view = crop.resize(size, Image.NEAREST if scale >= 1 else Image.LANCZOS)
-        board = Image.new('RGBA', size, (200, 200, 200, 255))
-        dark = Image.new('RGBA', (16, 16), (150, 150, 150, 255))
+        board = Image.new('RGBA', size, T['board'][0] + (255,))
+        dark = Image.new('RGBA', (16, 16), T['board'][1] + (255,))
         for y in range(0, size[1], 16):
             for x in range((y // 16) % 2 * 16, size[0], 32):
                 board.paste(dark, (x, y))
@@ -2065,6 +2164,7 @@ class App:
         small = base.copy()
         small.thumbnail((1024, 1024))
         w = self.recolour_win = tk.Toplevel(self.root)
+        dark_title_bar(w, T['bg'] is not None)
         w.title('Recolour %s' % self.name[:-8])
         w.transient(self.root)
         w.resizable(False, False)
@@ -2101,7 +2201,7 @@ class App:
             ttk.Label(f, textvariable=var, width=6).grid(row=r, column=2, sticky='e')
             var.trace_add('write', lambda *_ , v=var: v.set(round(v.get())) if v.get() != round(v.get()) else None)
         ttk.Label(f, text='The preview (texture or model) shows the result. Nothing is written until you import.',
-                  foreground='#555').grid(row=3, column=0, columnspan=3, sticky='w', pady=(6, 6))
+                  foreground=T['muted']).grid(row=3, column=0, columnspan=3, sticky='w', pady=(6, 6))
         b = ttk.Frame(f)
         b.grid(row=4, column=0, columnspan=3, sticky='e')
 
@@ -2203,11 +2303,24 @@ class App:
         else:
             self.error('No mods folder', ToolError('The mods folder does not exist:\n%s\nSet it in Settings.' % d))
 
+    def set_theme(self, name):
+        """Switch between the dark and light look without restarting."""
+        apply_theme(self.root, name)
+        dark_title_bar(self.root, T['bg'] is not None)
+        lc = list_colours() or {'background': 'white', 'foreground': 'black', 'selectbackground': '#0078d7',
+                                'selectforeground': 'white', 'highlightthickness': 1, 'borderwidth': 1}
+        for lb in (self.lb, self.mlb, self.llb):
+            lb.config(**lc)
+        self.canvas.config(bg=T['view'], highlightbackground=T['border'], highlightcolor=T['border'])
+        self.draw()
+
     def settings(self):
         if self.busy:
             return
         s = Settings(self.root, self.cfg)
         if s.changed:
+            if s.changed.get('theme') != self.cfg.get('theme', 'dark'):
+                self.set_theme(s.changed['theme'])
             self.cfg.update(s.changed)
             save_config(self.cfg)
             self.be.apply()
@@ -2223,7 +2336,8 @@ class ModPicker(simpledialog.Dialog):
         super().__init__(parent, 'Import into which mod?')
 
     def body(self, f):
-        ttk.Label(f, text='Put the new texture in this mod:').grid(row=0, column=0, columnspan=2, sticky='w')
+        dark_title_bar(self, T['bg'] is not None)
+        ttk.Label(f, text='Put it in this mod:').grid(row=0, column=0, columnspan=2, sticky='w')
         self.choice = tk.StringVar(value=self.mods[0] if self.mods else self.NEW)
         cb = ttk.Combobox(f, textvariable=self.choice, values=self.mods + [self.NEW], state='readonly', width=36)
         cb.grid(row=1, column=0, columnspan=2, sticky='we', pady=4)
@@ -2260,6 +2374,7 @@ class Settings(simpledialog.Dialog):
         super().__init__(parent, 'Settings')
 
     def body(self, f):
+        dark_title_bar(self, T['bg'] is not None)
         self.vars = {}
         for r, (k, label, is_dir) in enumerate(self.ROWS):
             ttk.Label(f, text=label).grid(row=r, column=0, sticky='w', padx=(0, 6), pady=2)
@@ -2268,11 +2383,15 @@ class Settings(simpledialog.Dialog):
             if is_dir:
                 ttk.Button(f, text='...', width=3, command=lambda v=v: self.browse(v)).grid(row=r, column=2, padx=(4, 0))
         ttk.Label(f, text='Point "Mods folder" at a scratch folder to try things without touching the game.',
-                  foreground='#555').grid(row=len(self.ROWS), column=0, columnspan=3, sticky='w', pady=(6, 0))
+                  foreground=T['muted']).grid(row=len(self.ROWS), column=0, columnspan=3, sticky='w', pady=(6, 0))
         ttk.Button(f, text='Use an NX2navi install...', command=self.use_nx2navi).grid(
             row=len(self.ROWS) + 1, column=0, sticky='w', pady=(6, 0))
         ttk.Label(f, text='Sets both folders to the install\'s romfs and mods (the folder with nx2navi.exe).',
-                  foreground='#555').grid(row=len(self.ROWS) + 1, column=1, columnspan=2, sticky='w', pady=(6, 0))
+                  foreground=T['muted']).grid(row=len(self.ROWS) + 1, column=1, columnspan=2, sticky='w', pady=(6, 0))
+        ttk.Label(f, text='Look').grid(row=len(self.ROWS) + 2, column=0, sticky='w', pady=(10, 0))
+        self.theme = tk.StringVar(value='Dark (One Dark)' if self.cfg.get('theme', 'dark') == 'dark' else 'Light')
+        ttk.Combobox(f, textvariable=self.theme, values=['Dark (One Dark)', 'Light'], state='readonly', width=18).grid(
+            row=len(self.ROWS) + 2, column=1, sticky='w', pady=(10, 0))
 
     def use_nx2navi(self):
         d = filedialog.askdirectory(parent=self, title='The NX2navi install folder (the one with nx2navi.exe)')
@@ -2298,6 +2417,7 @@ class Settings(simpledialog.Dialog):
 
     def apply(self):
         self.changed = {k: v.get().strip() for k, v in self.vars.items()}
+        self.changed['theme'] = 'dark' if self.theme.get().startswith('Dark') else 'light'
 
 
 def main():
