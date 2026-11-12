@@ -130,6 +130,8 @@ If your mod includes an ASTC texture, also share the `~Size table (made by the t
 - **Edit in paint program** opens the texture in your default image editor. Each time you save there, the tool's preview (texture or model) updates within a second. When you're happy, click **Import edited file**.
 - **Remove from mod** (when **Show** is on a mod's copy) deletes that mod's copy of the texture, after asking. The game's own texture is never touched.
 - **Export its textures...** (in the model view) saves every texture of the shown model as PNGs, for repainting a whole character.
+- **Import folder...** (top right) imports every PNG or DDS in a folder that is named like a texture into one mod, so you can repaint a whole character and bring it all back at once. Files with other names are listed and skipped.
+- The model view shows your whole mod: every part of the model uses the copy the game would load.
 
 ![Recolouring adult Link's hair, previewed on the model](docs/screenshot-recolour.png)
 

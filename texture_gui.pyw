@@ -315,29 +315,33 @@ class Backend:
         return m
 
     def model_textures(self, model, skip=()):
-        """{texture: RGBA numpy array} for each mesh's colour texture (small mip levels; cached)."""
+        """{texture: RGBA numpy array} for each mesh's colour texture, from the copy the game would load (the winning
+        mod's, else the game's own), at a small mip level; cached by file and time."""
         import numpy as np
         cache = getattr(self, '_tex_small', None)
         if cache is None:
             cache = self._tex_small = {}
+        order, off = self.mod_order()
+        live = [m for m in reversed(order) if m not in off and m != SIZE_MOD]
         out = {}
         for m in model.meshes:
             t = next((x for x in m.textures if x.endswith('_Alb')), None)
-            if not t or t in skip:
+            if not t or t in skip or t in out:
                 continue
-            if t not in cache:
-                p = self.path(t + '.bntx.zs')
-                if not os.path.exists(p):
-                    cache[t] = None
-                    continue
+            p = next((q for q in (os.path.join(self.cfg['mods'], mod, 'romfs', 'Tex', t + '.bntx.zs') for mod in live)
+                      if os.path.exists(q)), self.path(t + '.bntx.zs'))
+            if not os.path.exists(p):
+                continue
+            key = (p, os.path.getmtime(p))
+            if key not in cache:
                 try:
                     _, img = tt.decode_mip0(p, 512) if 'max_size' in tt.decode_mip0.__code__.co_varnames else tt.decode_mip0(p)
                     img.thumbnail((512, 512))
-                    cache[t] = np.asarray(img.convert('RGBA'))
+                    cache[key] = np.asarray(img.convert('RGBA'))
                 except Exception:
-                    cache[t] = None
-            if cache[t] is not None:
-                out[t] = cache[t]
+                    cache[key] = None
+            if cache[key] is not None:
+                out[t] = cache[key]
         return out
 
     def mods(self):
@@ -460,6 +464,7 @@ class App:
         self.count.pack(side='left', padx=(8, 0))
         ttk.Button(top, text='Settings...', command=self.settings).pack(side='right')
         ttk.Button(top, text='Open mods folder', command=self.open_mods).pack(side='right', padx=4)
+        ttk.Button(top, text='Import folder...', command=self.import_folder).pack(side='right')
         if SIZE_MOD:
             ttk.Button(top, text='Rebuild size table', command=self.rebuild_sizes).pack(side='right')
 
@@ -549,6 +554,9 @@ class App:
         threading.Thread(target=go, daemon=True).start()
 
     def poll(self):
+        if self.busy and getattr(self, 'progress', None):
+            self.say(self.progress)
+            self.progress = None
         try:
             while True:
                 done, res, err = self.jobs.get_nowait()
@@ -733,9 +741,7 @@ class App:
         self.modelcb.config(values=models, state="readonly"); self.bmexp.config(state="normal")
         if self.model.get() not in models:
             self.model.set(models[0])
-            self.pick_model()
-        else:
-            self.draw()
+        self.pick_model()   # (re)load: the model is cached; textures follow the mods as they are now
 
     def pick_model(self):
         name = self.model.get()
@@ -757,8 +763,9 @@ class App:
                 self.mdl = None
                 self.error('Could not show the model', err)
                 return
+            if self.mdl is None or self.mdl.name != name:
+                self.yaw, self.pitch, self.zoom = 0.5, -0.2, 1.0
             self.mdl, self.mdl_tex = res
-            self.yaw, self.pitch, self.zoom = 0.5, -0.2, 1.0
             if not self.mdl.meshes:
                 self.say('%s: no meshes this preview can read' % name)
                 self.draw()
@@ -958,6 +965,69 @@ class App:
                                 'compare it with the original.' % (path, how, self.size_note()), parent=self.root)
         self.work('Importing into %s (encoding every mip level, this can take a little while)...' % mod,
                   lambda: self.be.do_import(info, png, mod), done)
+
+    def import_folder(self):
+        """Import every PNG/DDS in a folder whose name is a texture's (as Export its textures... writes them) into one
+        mod. Files that match no texture, cannot be imported or have the wrong size are listed, not imported."""
+        if self.busy or not self.names:
+            return
+        folder = filedialog.askdirectory(parent=self.root, title='Folder with edited PNG or DDS files named like the textures',
+                                         initialdir=self.cfg['last_dir'])
+        if not folder:
+            return
+        files = sorted(f for f in os.listdir(folder) if f.lower().endswith(('.png', '.dds')))
+        known = set(self.names)
+        pairs = [(f, f[:-4] + '.bntx.zs') for f in files if f[:-4] + '.bntx.zs' in known]
+        skipped = [f for f in files if f[:-4] + '.bntx.zs' not in known]
+        if not pairs:
+            self.error('Nothing to import', ToolError('No PNG or DDS file in\n%s\nis named like a texture '
+                                                     '(for example Mt_Hairs_Player_Adult_Alb.png).' % folder))
+            return
+        if not messagebox.askyesno('Import folder?', 'Import %d files from\n%s\ninto one mod?%s' % (
+                len(pairs), folder, ('\n\n%d other files are not named like a texture and will be skipped.' % len(skipped))
+                if skipped else ''), parent=self.root):
+            return
+        mod = ModPicker(self.root, self.be.mods()).result
+        if not mod:
+            return
+        try:
+            self.be.safe_mod_dir(mod)
+        except ToolError as e:
+            self.error('Cannot use that mod folder', e)
+            return
+        self.cfg['last_dir'] = folder
+        save_config(self.cfg)
+
+        def job():
+            done_n, problems = 0, []
+            for i, (f, tex) in enumerate(pairs):
+                self.progress = 'Importing %d of %d: %s...' % (i + 1, len(pairs), f)
+                try:
+                    info, _ = self.be.decode(tex)
+                    self.be.do_import(info, os.path.join(folder, f), mod)
+                    done_n += 1
+                except Exception as e:  # noqa: BLE001 - listed to the owner
+                    problems.append('%s: %s' % (f, str(e).splitlines()[0]))
+            return done_n, problems
+
+        def done(res, err):
+            if err:
+                self.error('Import failed', err)
+                return
+            n, problems = res
+            self.modded = self.be.modded()
+            self.filter()
+            self.say('Imported %d files into mod "%s"' % (n, mod))
+            msg = 'Imported %d of %d files into the mod "%s".' % (n, len(pairs), mod)
+            if problems:
+                msg += '\n\nNot imported:\n' + '\n'.join(problems[:12]) + ('\n...' if len(problems) > 12 else '')
+            if skipped:
+                msg += '\n\nSkipped (not named like a texture): ' + ', '.join(skipped[:8]) + ('...' if len(skipped) > 8 else '')
+            messagebox.showinfo('Import folder', msg + self.size_note(), parent=self.root)
+            if self.name:
+                self.versions = self.be.versions(self.name)
+                self.load(self.name, next((p for _, p, win in self.versions if win), None))
+        self.work('Importing %d files into %s...' % (len(pairs), mod), job, done)
 
     def remove_copy(self):
         """Delete the shown mod's copy of this texture (the game's own files are never touched)."""
