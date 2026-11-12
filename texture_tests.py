@@ -103,6 +103,19 @@ def mods_ini(work):
     check(order == ['B', 'A, with comma', 'D off', 'C new'] and off == {'D off'}, 'mods.ini order and off: %s %s' % (order, off))
     win = [v[0] for v in be.versions(tex) if v[2]]
     check(win == ['Mod: C new (on, shown in game)'], 'mods.ini: the copy the game shows: %s' % win)
+    # an NX2navi install: nx2navi.ini [mods] mods_order (top wins), mods_disabled; unlisted mods after, by name
+    nx = os.path.join(work, 'nx2navi')
+    for m in ('A', 'B', 'C', 'D'):
+        os.makedirs(os.path.join(nx, 'mods', m, 'romfs', 'Tex'))
+        open(os.path.join(nx, 'mods', m, 'romfs', 'Tex', tex), 'w').close()
+    open(os.path.join(nx, 'nx2navi.exe'), 'w').close()
+    open(os.path.join(nx, 'nx2navi.ini'), 'w').write('[mods]\n; comment\nMods_Order = "B | A"\nNX2NAVI_MODS_DISABLED = D\n')
+    be = g.Backend(dict(g.DEFAULTS, romfs=ROMFS, mods=os.path.join(nx, 'mods')))
+    order, off = be.mod_order()
+    check(be.host == 'NX2navi' and order == ['D', 'C', 'A', 'B'] and off == {'D'},
+          'nx2navi.ini order (later wins here) and off: %s %s %s' % (be.host, order, off))
+    win = [v[0] for v in be.versions(tex) if v[2]]
+    check(win == ['Mod: B (on, shown in game)'], 'nx2navi.ini: the top mod wins: %s' % win)
 
 
 def models():

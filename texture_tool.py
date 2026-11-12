@@ -279,6 +279,16 @@ def to_bc7_layout(t):
 # bigger than its entry is not loaded (or the load hangs), so grown entries are merged into one table for all mods
 # (the larger value per entry, as Hookshot's mod notes describe).
 RSTB_PATH = os.path.join('System', 'Resource', 'ResourceSizeTable.Product.111.Nin_Ounce_NVN2.rsizetable.zs')
+
+
+def rstb_path(romfs):
+    """The resource size table of this romfs (its name carries the game version, Product.<n>), relative to the romfs."""
+    d = os.path.join(romfs, 'System', 'Resource')
+    try:
+        names = sorted(f for f in os.listdir(d) if f.startswith('ResourceSizeTable.') and f.endswith('.rsizetable.zs'))
+    except OSError:
+        names = []
+    return os.path.join('System', 'Resource', names[0]) if names else RSTB_PATH
 SIZE_MOD = '~Size table (made by the texture tool)'
 
 
@@ -331,14 +341,15 @@ def merge_sizes(mods_dir, romfs=None):
     when nothing needs a larger entry. Returns the number of entries raised."""
     romfs = romfs or game_romfs(None)
     with tempfile.TemporaryDirectory() as tmp:
-        base, dict_index = unzs(os.path.join(romfs, RSTB_PATH), romfs, tmp)
+        rstb = rstb_path(romfs)   # this game version's table; mods' tables for other versions are left out
+        base, dict_index = unzs(os.path.join(romfs, rstb), romfs, tmp)
         ver, namelen, crc, names = rstb_read(base)
         raised = 0
         for mod in sorted(os.listdir(mods_dir)):
             root = os.path.join(mods_dir, mod, 'romfs')
             if mod == SIZE_MOD or not os.path.isdir(root):
                 continue
-            own = os.path.join(root, RSTB_PATH)
+            own = os.path.join(root, rstb)
             if os.path.exists(own):
                 _, _, mcrc, mnames = rstb_read(unzs(own, romfs, tmp)[0])
                 for c, v in mcrc.items():
@@ -357,7 +368,7 @@ def merge_sizes(mods_dir, romfs=None):
                     rel = os.path.relpath(full, root).replace(os.sep, '/')[:-3]
                     raised += rstb_set(crc, names, rel, len(unzs(full, romfs, tmp)[0]) + 280)
         out_dir = os.path.join(mods_dir, SIZE_MOD)
-        dst = os.path.join(out_dir, 'romfs', RSTB_PATH)
+        dst = os.path.join(out_dir, 'romfs', rstb)
         if raised:
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             zs(rstb_write(ver, namelen, crc, names), romfs, dict_index, dst, tmp)

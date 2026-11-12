@@ -16,6 +16,10 @@
 
 ![Pink hair on adult Link in the model view](docs/screenshot-model.png)
 
+**In game:** young Link with a pink hair mod made with this tool (Windows recomp, 2026-11-11).
+
+![Young Link with pink hair in game](docs/ingame-pink-hair.jpg)
+
 The tool only reads the game's files. It writes to your mod folder and nowhere else.
 
 > This repository contains no game files. You need your own dump of the game.
@@ -27,6 +31,7 @@ The tool only reads the game's files. It writes to your mod folder and nowhere e
 - [Install](#install)
 - [Guide: your first texture mod](#guide-your-first-texture-mod)
 - [Settings](#settings)
+- [Using it with NX2navi](#using-it-with-nx2navi)
 - [What can be imported](#what-can-be-imported)
 - [Command line](#command-line)
 - [Troubleshooting](#troubleshooting)
@@ -182,6 +187,24 @@ The tool refuses any mods folder that overlaps the game's romfs, `merged\bin` or
 
 ---
 
+## Using it with NX2navi
+
+[NX2navi](https://github.com/tangerineturtle1/NX2navi), another PC port of the game, loads mods in the same layout this tool writes: one folder per mod in a `mods` folder next to `nx2navi.exe`, each holding `romfs\...`.
+
+1. In the tool, open **Settings...** and click **Use an NX2navi install...**. Pick the folder with `nx2navi.exe`.
+   - The tool reads the install's `romfs` (the same game version NX2navi runs) and writes mods into its `mods` folder.
+2. Make your texture mod as usual (export, edit, import). It goes straight into `<NX2navi>\mods\<mod name>\romfs\Tex\`.
+3. Start NX2navi and turn the mod on in its **Mods** tab, if it isn't already.
+
+Notes:
+- **Load order:** NX2navi keeps its mod order and the mods that are off in `nx2navi.ini` (`mods_order`, `mods_disabled`). There the **top** mod wins when two change the same file. The tool reads that, so **Show**'s "shown in game" mark matches what NX2navi loads.
+- **ASTC textures** become bigger BC7 files, and the tool writes a raised resource size table into the mod `~Size table (made by the texture tool)`. That file's name carries the game version (`ResourceSizeTable.Product.<n>...`), and NX2navi only uses a table for its own version. That's why step 1 matters: the tool then names it after the install's own romfs.
+- BC1, BC3, BC4, BC5 and BC7 textures keep their exact format and size, so they are the safest choice.
+- **Testing:** this way of working was written from NX2navi's published mod layout; it hasn't been tried in NX2navi itself yet. If a texture doesn't show, NX2navi's `logs\nx2navi.log` lists each mod and how many files it served.
+- NX2navi is a separate project by other people. This tool only writes ordinary mod files for it.
+
+---
+
 ## What can be imported
 
 | Format | Export | Import |
@@ -269,6 +292,7 @@ Environment variables: `TEXCONV_DIR` (folder with `texconv.exe`), `PY_ZSTD` (the
 | *The model view needs numpy* | Run `py -3.12 -m pip install numpy`. |
 | *Wrong DDS format* | Save the DDS in the format the panel shows (the mod's copy of an ASTC texture is BC7), or import a PNG instead. |
 | *unknown command encode-bc1* or similar | Your `texconv.exe` is from v0.1 or v0.2. Get `texconv-windows-x64.zip` from the latest release. |
+| A mod doesn't show in NX2navi | Turn it on in NX2navi's Mods tab and check its order (the top mod wins there). See `logs\nx2navi.log`, and [Using it with NX2navi](#using-it-with-nx2navi). |
 | *Pillow missing* | Run `py -3.12 -m pip install pillow`. |
 | Nothing happens on double-click | Make sure Python 3.12 is installed with the py launcher, then try `py -3.12 texture_gui.pyw` in a Command Prompt to see the error. |
 | My change doesn't show in game | Turn the mod on in the **Mods** tab and restart the game. A mod later in the load order wins if two change the same file. |

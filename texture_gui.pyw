@@ -179,13 +179,53 @@ class Backend:
         except TOOL_ERRORS as e:
             raise ToolError(str(e))
 
+    def nx2navi_ini(self):
+        """The nx2navi.ini of the NX2navi install whose mods folder this is (the mods folder next to nx2navi.exe), or None."""
+        parent = os.path.dirname(os.path.abspath(self.cfg['mods']))
+        ini = os.path.join(parent, 'nx2navi.ini')
+        if os.path.basename(os.path.abspath(self.cfg['mods'])).lower() == 'mods' and (
+                os.path.exists(ini) or os.path.exists(os.path.join(parent, 'nx2navi.exe'))):
+            return ini
+        return None
+
+    @property
+    def host(self):
+        return 'NX2navi' if self.nx2navi_ini() else 'this recomp'
+
     def mod_order(self):
-        """(load order, off set) as the game reads them (runtime/src/services/mods.cpp): mods.ini has "order = a | b"
-        and "off = x | y"; the load order is the listed mods that exist, then the other folders by name; every mod is
-        on unless it is in off."""
+        """(load order, off set), later mods winning, as the game that uses this mods folder reads them.
+        This recomp (runtime/src/services/mods.cpp): mods.ini "order = a | b", "off = x | y"; the listed mods, then the
+        other folders by name; later wins. NX2navi (its mods folder: the one next to nx2navi.exe): nx2navi.ini keys
+        mods_order and mods_disabled ('|' between names, keys case-insensitive, an optional NX2NAVI_ prefix, the
+        environment first); the TOP mod wins, unlisted folders come after the listed ones by name. Returned reversed so
+        that, here too, the last mod in the list wins. Every mod is on unless switched off."""
+        mods_dir = self.cfg['mods']
+        found = sorted(os.listdir(mods_dir)) if os.path.isdir(mods_dir) else []
+        found = [m for m in found if os.path.isdir(os.path.join(mods_dir, m))]
+        ini = self.nx2navi_ini()
         order, off = [], set()
+        if ini:
+            vals = {}
+            try:
+                for line in open(ini, encoding='utf-8', errors='replace'):
+                    line = line.strip()
+                    if not line or line[0] in '#;[' or '=' not in line:
+                        continue
+                    k, _, v = line.partition('=')
+                    k = k.strip().upper()
+                    k = k[8:] if k.startswith('NX2NAVI_') else k
+                    vals[k] = v.strip().strip('"')
+            except OSError:
+                pass
+            for k in ('MODS_ORDER', 'MODS_DISABLED'):
+                if os.environ.get('NX2NAVI_' + k):
+                    vals[k] = os.environ['NX2NAVI_' + k]
+            order = [x.strip() for x in vals.get('MODS_ORDER', '').split('|') if x.strip()]
+            off = {x.strip() for x in vals.get('MODS_DISABLED', '').split('|') if x.strip()}
+            top_first = [m for m in dict.fromkeys(order) if m in found] + [m for m in found if m not in order]
+            return list(reversed(top_first)), off
         try:
-            for line in open(os.path.join(self.cfg['mods'], 'mods.ini'), encoding='utf-8'):
+            for line in open(os.path.join(mods_dir, 'mods.ini'), encoding='utf-8'):
                 if '=' not in line or line[:1] in '#;':
                     continue
                 k, _, v = line.partition('=')
@@ -196,8 +236,6 @@ class Backend:
                     off = set(items)
         except OSError:
             pass
-        found = sorted(os.listdir(self.cfg['mods'])) if os.path.isdir(self.cfg['mods']) else []
-        found = [m for m in found if os.path.isdir(os.path.join(self.cfg['mods'], m))]
         names = [m for m in order if m in found]
         names = list(dict.fromkeys(names)) + [m for m in found if m not in names]
         return names, off
@@ -1639,6 +1677,27 @@ class Settings(simpledialog.Dialog):
                 ttk.Button(f, text='...', width=3, command=lambda v=v: self.browse(v)).grid(row=r, column=2, padx=(4, 0))
         ttk.Label(f, text='Point "Mods folder" at a scratch folder to try things without touching the game.',
                   foreground='#555').grid(row=len(self.ROWS), column=0, columnspan=3, sticky='w', pady=(6, 0))
+        ttk.Button(f, text='Use an NX2navi install...', command=self.use_nx2navi).grid(
+            row=len(self.ROWS) + 1, column=0, sticky='w', pady=(6, 0))
+        ttk.Label(f, text='Sets both folders to the install\'s romfs and mods (the folder with nx2navi.exe).',
+                  foreground='#555').grid(row=len(self.ROWS) + 1, column=1, columnspan=2, sticky='w', pady=(6, 0))
+
+    def use_nx2navi(self):
+        d = filedialog.askdirectory(parent=self, title='The NX2navi install folder (the one with nx2navi.exe)')
+        if not d:
+            return
+        d = os.path.normpath(d)
+        if not os.path.exists(os.path.join(d, 'nx2navi.exe')):
+            messagebox.showerror('Not an NX2navi install', 'nx2navi.exe is not in\n%s' % d, parent=self)
+            return
+        romfs = os.path.join(d, 'romfs')
+        if not os.path.exists(os.path.join(romfs, 'Pack', 'ZsDic.pack.zs')):
+            messagebox.showwarning('No romfs', 'The install has no romfs\\Pack\\ZsDic.pack.zs; set "Game romfs folder" '
+                                   'to a full romfs of the same game version.', parent=self)
+        else:
+            self.vars['romfs'].set(romfs)
+        os.makedirs(os.path.join(d, 'mods'), exist_ok=True)
+        self.vars['mods'].set(os.path.join(d, 'mods'))
 
     def browse(self, v):
         d = filedialog.askdirectory(parent=self, initialdir=v.get() or None)
