@@ -179,19 +179,27 @@ class Backend:
             raise ToolError(str(e))
 
     def mod_order(self):
-        """(load order list, off set) from mods.ini."""
+        """(load order, off set) as the game reads them (runtime/src/services/mods.cpp): mods.ini has "order = a | b"
+        and "off = x | y"; the load order is the listed mods that exist, then the other folders by name; every mod is
+        on unless it is in off."""
         order, off = [], set()
         try:
             for line in open(os.path.join(self.cfg['mods'], 'mods.ini'), encoding='utf-8'):
+                if '=' not in line or line[:1] in '#;':
+                    continue
                 k, _, v = line.partition('=')
-                items = [x.strip() for x in v.split(',') if x.strip()]
+                items = [x.strip() for x in v.split('|') if x.strip()]
                 if k.strip() == 'order':
                     order = items
                 elif k.strip() == 'off':
                     off = set(items)
         except OSError:
             pass
-        return order, off
+        found = sorted(os.listdir(self.cfg['mods'])) if os.path.isdir(self.cfg['mods']) else []
+        found = [m for m in found if os.path.isdir(os.path.join(self.cfg['mods'], m))]
+        names = [m for m in order if m in found]
+        names = list(dict.fromkeys(names)) + [m for m in found if m not in names]
+        return names, off
 
     def modded(self):
         """{texture file name: [mod, ...]} for every texture some mod replaces."""
@@ -208,15 +216,14 @@ class Backend:
 
     def versions(self, name):
         """[(label, path or None, is_winner)]: the game's copy, then each mod's copy in load order. The winner is the
-        last mod in the order that is on (what the game shows); mods not in mods.ini yet come after, as not on."""
+        last mod in the load order that is on (what the game shows)."""
         order, off = self.mod_order()
-        mods = [m for m in self.mods() if os.path.exists(os.path.join(self.cfg['mods'], m, 'romfs', 'Tex', name))]
-        mods.sort(key=lambda m: (order.index(m) if m in order else len(order), m.lower()))
-        on = [m for m in mods if m in order and m not in off]
+        mods = [m for m in order if m != SIZE_MOD and os.path.exists(os.path.join(self.cfg['mods'], m, 'romfs', 'Tex', name))]
+        on = [m for m in mods if m not in off]
         winner = on[-1] if on else None
         out = [('Original (game)', None, winner is None)]
         for m in mods:
-            state = 'off' if m in off else 'on' if m in order else 'not turned on yet'
+            state = 'off' if m in off else 'on'
             label = 'Mod: %s (%s%s)' % (m, state, ', shown in game' if m == winner else '')
             out.append((label, os.path.join(self.cfg['mods'], m, 'romfs', 'Tex', name), m == winner))
         return out
@@ -355,14 +362,14 @@ class Backend:
     def mod_state(self, mod):
         """'on', 'off' or 'not listed' from mods.ini (the Mods tab writes it)."""
         order, off = self.mod_order()
-        return 'off' if mod in off else 'on' if mod in order else 'not listed'
+        return 'off' if mod in off else 'on'
 
     def safe_mod_dir(self, mod):
         bad = set('<>:"/\\|?*')
         if not mod or mod.strip() != mod or mod in ('.', '..') or any(c in bad or ord(c) < 32 for c in mod) or mod.endswith('.'):
             raise ToolError('"%s" is not a usable folder name. Avoid  < > : " / \\ | ? *  and leading or trailing spaces.' % mod)
-        if ',' in mod:
-            raise ToolError('Mod names cannot contain a comma (mods.ini uses commas between names).')
+        if '|' in mod or '=' in mod:
+            raise ToolError('Mod names cannot contain | or = (mods.ini uses them).')
         mods = self.cfg['mods']
         dst = os.path.join(mods, mod)
         game = os.path.dirname(self.cfg['romfs'])
@@ -736,7 +743,12 @@ class App:
                 self.draw()
                 return
             used = sum(1 for m in self.mdl.meshes if self.name and self.be.model_slot(self.name) in m.textures)
-            self.say('%s: %d meshes, %d use %s. Drag to turn, wheel to zoom.' % (name, len(self.mdl.meshes), used, self.name[:-8]))
+            if all(m.name.lower().startswith('dummy') for m in self.mdl.meshes):
+                self.say('%s is only a placeholder (a %d-triangle "dummy" mesh); in the game this texture is put on another '
+                         'model. Try another model in the list.' % (name, sum(len(m.tris) for m in self.mdl.meshes)))
+            else:
+                self.say('%s: %d meshes, %d use %s. Drag to turn, wheel to zoom.' % (name, len(self.mdl.meshes), used,
+                                                                                     self.name[:-8]))
             self.draw()
         self.work('Loading the model %s...' % name, job, done)
 
@@ -878,14 +890,17 @@ class App:
                 self.error('Import failed', err)
                 return
             state = self.be.mod_state(mod)
-            how = {'on': 'It is already on in the Mods tab; restart the game to see it.',
-                   'off': 'It is turned OFF: turn it on in the game\'s Mods tab, then restart the game.'}.get(
-                state, 'Turn it on in the game\'s Mods tab (menu), then restart the game.')
+            how = ('The mod "%s" is on (new mods start on); restart the game to see it.' % mod if state == 'on' else
+                   'The mod "%s" is turned OFF: turn it on in the game\'s Mods tab, then restart the game.' % mod)
             self.say('Imported %s into mod "%s"' % (name, mod))
             # show the new copy in place of the old one
             self.modded = self.be.modded()
             self.filter()
             self.versions = self.be.versions(name)
+            win = next((label for label, p, w in self.versions if w and p and not inside(p, os.path.join(self.cfg['mods'], mod))), None)
+            if win and state == 'on':
+                how += ('\n\nBut another mod later in the load order also changes this texture, so the game shows its copy '
+                        '(%s). Move "%s" below it in the Mods tab, or turn that mod off.' % (win, mod))
             self.end_override()
             self.load(name, path)
             messagebox.showinfo('Imported', 'Done. Wrote:\n%s\n\n%s%s\n\nThe preview now shows the mod\'s copy; use Show to '
