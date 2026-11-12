@@ -75,7 +75,7 @@ def _merge(texs, mat, parts):
                             np.concatenate(U).astype(np.float32), np.concatenate(N).astype(np.float32),
                             np.concatenate(T).astype(np.int64))
     n = np.linalg.norm(mesh.nrm, axis=1, keepdims=True)
-    mesh.nrm = np.where(n > 0, mesh.nrm / np.maximum(n, 1e-12), 0).astype(np.float32)
+    mesh.nrm = np.where(n > 0, mesh.nrm / np.maximum(n, 1e-12), 0).astype(np.float32) if n.any() else None   # none: face shading
     mesh.owner = np.concatenate(O)
     return mesh
 
@@ -97,7 +97,8 @@ def light(model, cells=300):
         st = np.sort(t, 1)
         _, uniq = np.unique(st[:, 0] * 1_000_003 ** 2 + st[:, 1] * 1_000_003 + st[:, 2], return_index=True)
         t = t[uniq]
-        mesh = bfres_model.Mesh(m.name, m.material, m.textures, m.pos[first], m.uv[first], m.nrm[first], t)
+        mesh = bfres_model.Mesh(m.name, m.material, m.textures, m.pos[first], m.uv[first],
+                                None if m.nrm is None else m.nrm[first], t)
         mesh.owner = m.owner[keep][uniq]
         out.append(mesh)
     lm = bfres_model.Model(model.name, out)

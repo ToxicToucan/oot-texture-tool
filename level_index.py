@@ -6,7 +6,8 @@
 Reads every level layout (Banc/<area>/<level>_Static/_Dynamic.bcett.byml.zs) and, for every actor placed there, its
 actor pack (Pack/Actor/<actor>.pack.zs) to find the model it shows (ActorParam -> ModelInfo, following $parent).
 Writes {"romfs": ..., "levels": {"Area/Level": [[actor, model or "", x, y, z, rx, ry, rz, sx, sy, sz], ...]},
-"models": {actor: model}}. Rotations are radians (X, Y, Z). About a minute.
+"models": {actor: model}, "shapes": {actor: [collision shape, ...]}} (shapes: PhysicsParam -> ControllerSetParam ->
+ShapeParam -> Phive/Shape/Dcc/<shape>.bphsh.zs, drawn for terrain whose own mesh cannot be read). Rotations are radians (X, Y, Z). About a minute.
 """
 import json
 import os
@@ -52,11 +53,11 @@ def ref_path(ref):
 
 
 def actor_model(rd, actor, models):
-    """'Project.Fmdb' for an actor, or ''."""
+    """('Project.Fmdb' or '', [collision shape names]) for an actor."""
     try:
         files = sarc.parse(rd.read('Pack', 'Actor', actor + '.pack.zs'))
     except (OSError, ValueError, zstd.ZstdError):
-        return ''
+        return '', []
 
     def chain(path):
         seen = []
@@ -72,11 +73,12 @@ def actor_model(rd, actor, models):
                 break
             path = ref_path(par)
 
-    info_ref = None
+    info_ref = phys_ref = None
     for d in chain('Actor/%s.engine__actor__ActorParam.bgyml' % actor):
-        info_ref = (d.get('Components') or {}).get('ModelInfoRef')
-        if info_ref:
-            break
+        comps = d.get('Components') or {}
+        info_ref = info_ref or comps.get('ModelInfoRef')
+        phys_ref = phys_ref or comps.get('PhysicsRef')
+    shapes = actor_shapes(files, chain, phys_ref)
     if info_ref:
         cands = [ref_path(info_ref)]
     else:   # no ActorParam link: a ModelInfo named after the actor, or the only one
@@ -89,8 +91,34 @@ def actor_model(rd, actor, models):
             proj = proj or d.get('ModelProjectName')
             fmdb = fmdb or d.get('FmdbName')
         if proj and fmdb and proj + '.' + fmdb in models:
-            return proj + '.' + fmdb
-    return ''
+            return proj + '.' + fmdb, shapes
+    return '', shapes
+
+
+def actor_shapes(files, chain, phys_ref):
+    """Collision shapes (Phive/Shape/Dcc/<name>.bphsh.zs): PhysicsParam -> ControllerSetParam -> ShapeParam -> PhshMesh."""
+    if not phys_ref:
+        return []
+    cset = None
+    for d in chain(ref_path(phys_ref)):
+        cset = cset or d.get('ControllerSetPath')
+    if not cset:
+        return []
+    params = []
+    for d in chain(ref_path(cset)):
+        for e in d.get('ShapeNamePathAry') or []:
+            if isinstance(e, dict) and e.get('FilePath') and ref_path(e['FilePath']) not in params:
+                params.append(ref_path(e['FilePath']))
+    out = []
+    for sp in params:
+        for d in chain(sp):
+            for m in d.get('PhshMesh') or []:
+                name = (m.get('PhshMeshPath') or '').split('/')[-1]
+                if name.endswith('.phsh') and name[:-5] not in out:
+                    out.append(name[:-5])
+            if d.get('PhshMesh'):
+                break
+    return out
 
 
 def vec(a, key, default):
@@ -108,7 +136,7 @@ def main(romfs, out, only=None):
     rd = Reader(romfs)
     models = {f[:-9] for f in os.listdir(os.path.join(romfs, 'Model')) if f.endswith('.bfres.zs')}
     banc = os.path.join(romfs, 'Banc')
-    levels, actor_models = {}, {}
+    levels, actor_models, actor_shapes_ = {}, {}, {}
     files = [(area, f) for area in sorted(os.listdir(banc)) if os.path.isdir(os.path.join(banc, area))
              for f in sorted(os.listdir(os.path.join(banc, area))) if f.endswith('.bcett.byml.zs')]
     for i, (area, f) in enumerate(files):
@@ -129,13 +157,15 @@ def main(romfs, out, only=None):
             if not name:
                 continue
             if name not in actor_models:
-                actor_models[name] = actor_model(rd, name, models)
+                actor_models[name], shp = actor_model(rd, name, models)
+                if shp:
+                    actor_shapes_[name] = shp
             rows.append([name, actor_models[name]] + vec(a, 'Translate', 0.0) + vec(a, 'Rotate', 0.0) + vec(a, 'Scale', 1.0))
         if i % 10 == 0:
             print('%d/%d levels files, %d actors' % (i, len(files), len(actor_models)), flush=True)
     tmp = out + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as fp:
-        json.dump({'romfs': os.path.abspath(romfs), 'levels': levels, 'models': actor_models}, fp, separators=(',', ':'))
+        json.dump({'romfs': os.path.abspath(romfs), 'levels': levels, 'models': actor_models, 'shapes': actor_shapes_}, fp, separators=(',', ':'))
     os.replace(tmp, out)
     print('done: %d levels, %d actors, %d with a model' % (len(levels), len(actor_models),
                                                          sum(1 for v in actor_models.values() if v)))

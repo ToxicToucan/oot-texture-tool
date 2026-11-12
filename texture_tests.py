@@ -5,7 +5,7 @@
 
 Checks: for one texture of each format, export -> import unchanged -> export again stays close (PSNR floor per format),
 alpha survives, and DDS export -> DDS import gives identical blocks; BC2/BC6H are refused; mods.ini is read like the
-game; a few models load and draw; a small level is put together from its layout and drawn. Needs texconv.exe (TEXCONV_DIR or next to texture_tool.py) and Python 3.14+ for zstd.
+game; a few models load and draw; a small level is put together from its layout and drawn; a collision shape is read. Needs texconv.exe (TEXCONV_DIR or next to texture_tool.py) and Python 3.14+ for zstd.
 Exit code 0 when everything passes.
 """
 import math
@@ -164,6 +164,16 @@ def levels(work):
     drawn = int((bufs[3] >= 0).sum())
     owners = {rows[int(o)][0] for o in numpy.unique(bufs[3]) if o >= 0}
     check(drawn > 1000 and len(owners) >= 2, 'DinolfosStage drawn: %d pixels, %d actors under them' % (drawn, len(owners)))
+    # collision shapes stand in for terrain the model reader cannot draw
+    import phive_shape
+    with tempfile.TemporaryDirectory() as tmp:
+        data, _ = tt.unzs(os.path.join(ROMFS, 'Phive', 'Shape', 'Dcc',
+                                       'Land_DodongoCave_Ladder_A_01__Physical.Nin_Ounce_NVN2.bphsh.zs'), ROMFS, tmp)
+    pos, tris = phive_shape.read(data)
+    lo, hi = pos.min(0), pos.max(0)
+    check(len(tris) >= 10 and numpy.allclose(lo, (-0.5996, 0, -0.0996), atol=1e-3)
+          and numpy.allclose(hi, (0.5996, 3.125, 0.0996), atol=1e-3),
+          'collision shape of Land_DodongoCave_Ladder_A_01: %d triangles, box %s to %s' % (len(tris), lo.round(3), hi.round(3)))
     light = level_view.light(lv, 100)
     check(0 < level_view.stats(light)[1] < level_view.stats(lv)[1], 'light copy: %d of %d triangles' % (
         level_view.stats(light)[1], level_view.stats(lv)[1]))

@@ -163,7 +163,7 @@ Paint lands in the texture at the spot under the brush, so anything that shares 
 3. **Click** a part: its texture is selected, and every place the level uses it turns gold. Export, import, recolour or paint it as usual; the level shows your change.
 4. **Show far scenery** adds the distant mountains and sky around outdoor levels.
 
-Ground stored as terrain ("taskmesh") isn't drawn yet, so fields and some floors show gaps.
+Some terrain pieces (room shells, cliffs) keep their mesh in a packed "taskmesh" form the tool can't read. Their collision shape stands in, plain grey and simpler than the real model, with the faces towards you left out so you can see into rooms. Field ground (heightmaps) isn't drawn yet, so open fields still show gaps.
 
 ![Kakariko Village in the Levels tab, with the stairs texture shown in gold](docs/screenshot-level.png)
 
@@ -350,6 +350,7 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 **The Levels tab:**
 - `level_index.py` (Python 3.14+) reads each level layout (`Banc\<area>\<level>_Static/_Dynamic.bcett.byml.zs`, BYML files listing every placed object with its position, rotation and scale). For each object it opens the actor pack (`Pack\Actor\<name>.pack.zs`, a SARC archive) and follows `ActorParam` to `ModelInfo` to find the model. The list is cached in `%LOCALAPPDATA%\oot-texture-gui\level_index.json`.
 - `level_view.py` moves each model into place and merges parts that share a material, keeping which object each triangle came from so clicks can name it. While you move the view it draws a coarse copy (vertices snapped to a grid), then the full level when you stop.
+- Terrain pieces stored as "taskmesh" (a packed meshlet form) are drawn from their collision shape instead. The level list follows each object's `PhysicsParam` to `ControllerSetParam` to `ShapeParam` to the `.phsh` mesh. `phive_shape.py` reads that Havok tagfile: the item index finds the geometry sections, each with 4-index primitives (a triangle when the last two match) and 16-bit vertices: (section offset + value) / 512.
 
 | File | Purpose |
 | --- | --- |
@@ -363,6 +364,7 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 | `level_view.py` | Puts a level together for the Levels tab |
 | `export_model.py` | Exports a model as OBJ + MTL + PNGs; also a command-line tool: `py -3.12 export_model.py <model> <folder>` |
 | `byml.py`, `sarc.py` | Read BYML layout files and SARC packs |
+| `phive_shape.py` | Reads collision shapes, drawn grey for terrain whose own mesh can't be read |
 | `texture_tests.py` | Regression checks (runs in a temporary folder): `py -3.12 texture_tests.py` |
 | `texconv.cpp`, `build-texconv.cmd` | The codec helper (ASTC decode; BC1, BC3, BC4, BC5, BC7 encode) and its build script |
 | `textures/` | The `astc2bc7` library that `texconv` links (ASTC decode, BC7 encode) |

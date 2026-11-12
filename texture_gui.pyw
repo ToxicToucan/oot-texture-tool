@@ -389,9 +389,10 @@ class Backend:
             return self._levels
         try:
             j = json.load(open(os.path.join(os.path.dirname(self.index_path), 'level_index.json'), encoding='utf-8'))
-            if norm(j['romfs']) != norm(self.cfg['romfs']):
-                return None
+            if norm(j['romfs']) != norm(self.cfg['romfs']) or 'shapes' not in j:
+                return None   # another romfs, or an older list without collision shapes: rebuilt
             self._levels = j['levels']
+            self._actor_shapes, self._actor_models = j['shapes'], j['models']
             return self._levels
         except (OSError, ValueError, KeyError):
             return None
@@ -443,11 +444,47 @@ class Backend:
                         cache[m] = bfres_model.parse(open(os.path.join(tmp, '%d.bin' % i), 'rb').read(), m)
                     except Exception:  # noqa: BLE001 - unreadable models are left out of the level
                         cache[m] = None
+        # terrain whose own mesh cannot be read: its collision shapes stand in, plain grey
+        stand = {}
+        for r in rows:
+            if r[1] in getattr(self, '_flat', ()) and r[1] not in stand and (far or not level_view.is_far(r)):
+                stand[r[1]] = self.collision_model(r[1], self._actor_shapes.get(r[0], []))
         say('Putting %s together...' % name)
-        model = level_view.build(name, rows, cache.get, skip)
+        model = level_view.build(name, rows, lambda m: cache[m] if cache.get(m) is not None and cache[m].meshes else stand.get(m), skip)
         say('Reading the textures of %s...' % name)
         tex = self.level_textures(model, say)
         return model, level_view.light(model), tex
+
+    def collision_model(self, model, shapes=None):
+        """A stand-in Model (plain grey) made from the collision shapes of a terrain model the reader cannot draw, or None.
+        shapes: the shape names (from the level list); by default those of any actor that shows this model."""
+        import bfres_model
+        import numpy as np
+        import phive_shape
+        if shapes is None:
+            self.level_index()
+            shapes = next((self._actor_shapes[a] for a, m in sorted(getattr(self, '_actor_models', {}).items())
+                           if m == model and self._actor_shapes.get(a)), [])
+        cache = getattr(self, '_shape_cache', None)
+        if cache is None:
+            cache = self._shape_cache = {}
+        want = [s for s in shapes if s not in cache]
+        if want:
+            dcc = os.path.join(self.cfg['romfs'], 'Phive', 'Shape', 'Dcc')
+            with tempfile.TemporaryDirectory() as tmp:
+                pairs = [(os.path.join(dcc, s + '.Nin_Ounce_NVN2.bphsh.zs'), os.path.join(tmp, '%d.bin' % i)) for i, s in enumerate(want)]
+                self.unzs_many([p for p in pairs if os.path.exists(p[0])])
+                for s, (_, out) in zip(want, pairs):
+                    try:
+                        cache[s] = phive_shape.read(open(out, 'rb').read())
+                    except Exception:  # noqa: BLE001 - missing or unreadable shapes are left out
+                        cache[s] = None
+        meshes = []
+        for s in shapes:
+            if cache.get(s) is not None:
+                pos, tris = cache[s]
+                meshes.append(bfres_model.Mesh(s, bfres_model.COLLISION, [], pos, np.zeros((len(pos), 2), np.float32), None, tris))
+        return bfres_model.Model(model, meshes) if meshes else None
 
     def level_textures(self, model, say=lambda text: None):
         """{texture: small RGBA array} for a level's colour textures (the copy the game would load). The game's own
@@ -974,10 +1011,29 @@ class App:
         if self.busy:
             return self.root.after(200, self.pick_model)
         if name in getattr(self.be, '_flat', ()):
-            import bfres_model
-            self.mdl = bfres_model.Model(name, [])   # terrain piece: says so without loading it
-            self.say('%s keeps its meshes in a form the preview cannot read yet.' % name)
-            self.draw()
+            # terrain piece: its own mesh cannot be read; its collision shape (plain grey) stands in when the level list
+            # knows one
+            def shape_job():
+                import bfres_model
+                return (self.be.collision_model(name) if self.be.level_index() is not None else None) or                     bfres_model.Model(name, [])
+
+            def shape_done(res, err):
+                if err:
+                    self.mdl = None
+                    self.error('Could not show the model', err)
+                    return
+                if self.mdl is None or self.mdl.name != name:
+                    self.yaw, self.pitch, self.zoom = 0.5, -0.2, 1.0
+                self.mdl, self.mdl_tex = res, {}
+                if res.meshes:
+                    self.say('%s: its mesh is stored in a form the preview cannot read, so its collision shape is shown '
+                             '(plain grey, simpler than the real model).' % name)
+                else:
+                    self.say('%s keeps its meshes in a form the preview cannot read yet%s.' % (
+                        name, '' if self.be.level_index() is not None else '; building the level list (Levels tab) '
+                        'lets it show the collision shape instead'))
+                self.draw()
+            self.work('Loading the collision shape of %s...' % name, shape_job, shape_done)
             return
 
         def job():
@@ -1229,6 +1285,8 @@ class App:
         owner = self.pick_owner(x, y) if self.level else None
         if owner is not None:
             row = self.mdl.rows[owner]
+            if not mesh.textures:
+                listing = 'no texture (terrain shown by its collision shape)'
             self.level_note = '%s (model %s) at %.0f, %.0f, %.0f uses %s' % (row[0], row[1], row[2], row[3], row[4], listing)
             self.say(self.level_note)
             if tex and tex != hl:
@@ -1373,7 +1431,7 @@ class App:
         flat = getattr(self.be, '_flat', set())
         words = self.mq.get().lower().split()
         self.models_all = [m for m in sorted(idx, key=str.lower) if all(w in m.lower() for w in words)]
-        self.mlb.insert('end', *[m + ('   (terrain: no preview)' if m in flat else '') for m in self.models_all])
+        self.mlb.insert('end', *[m + ('   (terrain: collision shape)' if m in flat else '') for m in self.models_all])
         self.mcount.config(text='%d models' % len(self.models_all))
 
     def models_tab_select(self):
@@ -1490,7 +1548,7 @@ class App:
             shown = len({int(o) for m in self.mdl.meshes for o in numpy.unique(m.owner)})
             ntri = sum(len(m.tris) for m in self.mdl.meshes)
             self.details.config(text='%d placed actors, %d drawn (%d triangles); %d textures.\n'
-                                     'Terrain stored as "taskmesh" is not drawn yet.' % (
+                                     'Plain grey: terrain shown by its collision shape. Field ground (heightmaps) is not drawn yet.' % (
                                          len(rows), shown, ntri, len(self.mdl_tex)))
             self.canimport.config(text='')
             self.draw()

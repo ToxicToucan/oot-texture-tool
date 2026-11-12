@@ -29,6 +29,10 @@ LAYOUTS = {0x02: (1, 8), 0x09: (2, 8), 0x0B: (4, 8), 0x0A: (1, 16), 0x12: (2, 16
            0x17: (2, 32), 0x18: (3, 32), 0x19: (4, 32)}
 
 
+COLLISION = '(collision shape)'   # material of stand-in meshes made from collision shapes: drawn plain grey
+CULL_SIGN = -1.0   # which screen winding faces the camera, for the collision shapes' winding
+
+
 class Mesh:
     def __init__(self, name, material, textures, pos, uv, nrm, tris):
         self.name, self.material, self.textures = name, material, textures
@@ -254,7 +258,7 @@ def render(model, textures, size=(512, 512), yaw=0.6, pitch=-0.25, highlight=Non
     for m in meshes:
         tex_name = highlight if highlight in m.textures else next((t for t in m.textures if t.endswith('_Alb')), None)
         tex = textures.get(tex_name) if tex_name else None
-        if tex_name is None:
+        if tex_name is None and m.material != COLLISION:
             continue   # no colour texture (clear eye covers, shadow casters): not drawn
         dim = dim_others and highlight is not None and highlight not in m.textures
         if tint is not None and highlight is not None and not dim:
@@ -295,6 +299,8 @@ def _raster(m, sx, sy, sz, p, tex, dim, light, W, H, zbuf, colour, vshade=None, 
     x0, y0 = np.maximum(x0, 0), np.maximum(y0, 0)
     x1, y1 = np.minimum(x1, W - 1), np.minimum(y1, H - 1)
     keep = (x1 >= x0) & (y1 >= y0)
+    if m.material == COLLISION:   # collision stand-ins: only faces turned towards the camera, so rooms open like a dollhouse
+        keep &= ((x[:, 1] - x[:, 0]) * (y[:, 2] - y[:, 0]) - (y[:, 1] - y[:, 0]) * (x[:, 2] - x[:, 0])) * CULL_SIGN > 0
     bw, bh = x1 - x0 + 1, y1 - y0 + 1
     lw = np.minimum(np.searchsorted(STEPS, bw), len(STEPS) - 1)
     lh = np.minimum(np.searchsorted(STEPS, bh), len(STEPS) - 1)
