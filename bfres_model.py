@@ -38,6 +38,7 @@ class Mesh:
     def __init__(self, name, material, textures, pos, uv, nrm, tris):
         self.name, self.material, self.textures = name, material, textures
         self.pos, self.uv, self.nrm, self.tris = pos, uv, nrm, tris
+        self.src = None   # where the mesh lives in the file (parse() fills it in; model_import.py writes there)
 
 
 class Model:
@@ -137,12 +138,13 @@ def parse(b, name=''):
         for k in range(nbuf):
             starts.append(at)
             at += (sizes[k] + 7) & ~7
-        attrs = {}
+        attrs, where = {}, {}
         for k in range(nattr):
             a = u64(v + 8) + k * 0x10
             an, fmt, off, buf = s(u64(a)), u32(a + 8), u16(a + 12), u16(a + 14)
             if buf < nbuf and an in ('_p0', '_u0', '_n0', '_i0'):
                 attrs[an] = _attr(b, starts[buf], count, strides[buf], off, fmt)
+                where[an] = (starts[buf] + off, strides[buf], fmt)
         pos = attrs.get('_p0')
         if pos is None:
             continue
@@ -152,10 +154,12 @@ def parse(b, name=''):
         nrm = attrs.get('_n0')
         nrm = nrm[:, :3].copy() if nrm is not None else None
         # rigid meshes: vertices are in their bone's space
+        place = []   # (vertex selection or None for all, rotation-scale, translation) applied to the stored vertices
         if bones and skin <= 1:
             if skin == 0:
                 world = bones[bone] if bone < len(bones) else None
                 if world is not None:
+                    place.append((None, world[0], world[1]))
                     pos = pos @ world[0].T + world[1]
                     if nrm is not None:
                         nrm = nrm @ world[0].T
@@ -169,6 +173,7 @@ def parse(b, name=''):
                     sel = idx == j
                     if sel.any():
                         r, t = bones[bi]
+                        place.append((sel, r, t))
                         pos[sel] = pos[sel] @ r.T + t
                         if nrm is not None:
                             nrm[sel] = nrm[sel] @ r.T
@@ -181,7 +186,9 @@ def parse(b, name=''):
         idx = idx[:len(idx) // 3 * 3].reshape(-1, 3)
         idx = idx[(idx < count).all(1)]
         mname, mtex = mats[mi] if mi < len(mats) else ('', [])
-        meshes.append(Mesh(sname, mname, mtex, pos, uv, nrm, idx))
+        mesh = Mesh(sname, mname, mtex, pos, uv, nrm, idx)
+        mesh.src = {'shape': o, 'count': count, 'attrs': where, 'place': place}
+        meshes.append(mesh)
     return Model(name or s(u64(mdl + 8)), meshes)
 
 

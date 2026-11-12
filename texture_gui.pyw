@@ -332,14 +332,36 @@ class Backend:
                 return base + '.0'
         return tex
 
+    def model_file(self, model):
+        """(path, mod or None): the copy of Model/<model>.bfres.zs the game would load (the winning mod's, else its own)."""
+        order, off = self.mod_order()
+        for m in reversed(order):
+            if m in off or m == SIZE_MOD:
+                continue
+            p = os.path.join(self.cfg['mods'], m, 'romfs', 'Model', model + '.bfres.zs')
+            if os.path.exists(p):
+                return p, m
+        return os.path.join(self.cfg['romfs'], 'Model', model + '.bfres.zs'), None
+
+    def import_model(self, model, obj, mod):
+        """Moved vertices of an edited OBJ into <mod>/romfs/Model/<model>.bfres.zs (model_import.py). A summary line."""
+        import model_import
+        try:
+            return model_import.import_obj(model, obj, self.safe_mod_dir(mod), self.cfg['romfs'])
+        except model_import.ImportError_ as e:
+            raise ToolError(str(e))
+        finally:
+            getattr(self, '_models', {}).pop(model, None)
+
     def load_model(self, model):
         import bfres_model
         cache = getattr(self, '_models', None)
         if cache is None:
             cache = self._models = {}
-        if model in cache:
+        src = self.model_file(model)[0]
+        key = (src, os.path.getmtime(src) if os.path.exists(src) else 0)
+        if model in cache and getattr(cache[model], 'source', None) == key:
             return cache[model]
-        src = os.path.join(self.cfg['romfs'], 'Model', model + '.bfres.zs')
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 data, _ = tt.unzs(src, tt.game_romfs(None), tmp)
@@ -348,6 +370,7 @@ class Backend:
             raise ToolError(str(e))
         except Exception as e:
             raise ToolError('Could not read the model %s: %s' % (model, e))
+        m.source = key
         if len(cache) > 6:
             cache.pop(next(iter(cache)))
         cache[model] = m
@@ -814,10 +837,12 @@ class App:
         self.modelcb = ttk.Combobox(mrow, textvariable=self.model, state='disabled', width=46)
         self.modelcb.pack(side='left')
         self.modelcb.bind('<<ComboboxSelected>>', lambda _: self.pick_model())
-        self.bmexp = ttk.Button(mrow, text='Export its textures...', command=self.export_model_textures, state='disabled')
+        self.bmexp = ttk.Button(mrow, text='Export textures...', command=self.export_model_textures, state='disabled')
         self.bmexp.pack(side='left', padx=(6, 0))
-        self.bobj = ttk.Button(mrow, text='Export model (OBJ)...', command=self.export_model_obj, state='disabled')
+        self.bobj = ttk.Button(mrow, text='Export OBJ...', command=self.export_model_obj, state='disabled')
         self.bobj.pack(side='left', padx=(6, 0))
+        self.bobjin = ttk.Button(mrow, text='Import OBJ...', command=self.import_model_obj, state='disabled')
+        self.bobjin.pack(side='left', padx=(6, 0))
         prow = ttk.Frame(right)
         prow.pack(anchor='w', fill='x', pady=(0, 6))
         self.painting = tk.BooleanVar(value=False)
@@ -1634,6 +1659,7 @@ class App:
             self.model.set('Level: ' + name)
             self.bmexp.config(state='normal')
             self.bobj.config(state='disabled')
+            self.bobjin.config(state='disabled')
             self.title.config(text=name)
             placed = len(self.be.level_index()[name])   # the ground's row comes after the placed actors
             shown = len({int(o) for m in self.mdl.meshes for o in numpy.unique(m.owner)} - {placed})
@@ -1909,6 +1935,7 @@ class App:
     def model_buttons(self, state):
         self.bmexp.config(state=state)
         self.bobj.config(state=state)
+        self.bobjin.config(state=state)
 
     def selected_list_model(self):
         sel = self.mlb.curselection()
@@ -1946,6 +1973,7 @@ class App:
             def winner(_mods, name):   # the window's own mod order (mods.ini or nx2navi.ini)
                 return next((p for _, p, win in self.be.versions(name + '.bntx.zs') if win and p), None)
             em.mod_texture = winner
+            em.model_file = lambda _romfs, name: self.be.model_file(name)[0]   # a mod's copy of the model, if one wins
             out, argv = io.StringIO(), sys.argv
             sys.argv = ['export_model.py', model, folder, '--romfs', self.cfg['romfs'], '--mods', self.cfg['mods']]
             try:
@@ -1966,6 +1994,48 @@ class App:
             self.say(res.splitlines()[0] if res else 'Exported %s' % model)
             messagebox.showinfo('Exported', res or model, parent=self.root)
         self.work('Exporting %s as OBJ...' % model, job, done)
+
+    def import_model_obj(self):
+        """An edited OBJ (as Export OBJ... wrote it, vertices moved but none added or removed) into a mod's copy of
+        the model (model_import.py)."""
+        model = None if self.level else self.model.get()
+        if not model or model.startswith('Level: ') or self.busy:
+            return
+        obj = filedialog.askopenfilename(parent=self.root, title='Edited OBJ of %s' % model, initialdir=self.cfg['last_dir'],
+                                         filetypes=[('OBJ', '*.obj'), ('All files', '*.*')])
+        if not obj:
+            return
+        self.cfg['last_dir'] = os.path.dirname(obj)
+        save_config(self.cfg)
+        mod = ModPicker(self.root, self.be.mods()).result
+        if not mod:
+            return
+        try:
+            dst = os.path.join(self.be.safe_mod_dir(mod), 'romfs', 'Model', model + '.bfres.zs')
+        except ToolError as e:
+            self.error('Cannot use that mod folder', e)
+            return
+        if os.path.exists(dst) and not messagebox.askyesno(
+                'Replace?', 'The mod "%s" already has a copy of %s.' % (mod, model) + chr(10) + 'Replace it?', parent=self.root):
+            return
+
+        def done(res, err):
+            if err:
+                self.error('Import model failed', err)
+                return
+            state = self.be.mod_state(mod)
+            how = ('The mod "%s" is on (new mods start on); restart the game to see it.' % mod if state == 'on' else
+                   "The mod \"%s\" is turned OFF: turn it on in the game's Mods tab, then restart the game." % mod)
+            shown, by = self.be.model_file(model)
+            if state == 'on' and by and by != mod:
+                how += chr(10) * 2 + ('But "%s", later in the load order, also has this model, so the game shows its copy. '
+                                      'Move "%s" below it in the Mods tab, or turn that mod off.' % (by, mod))
+            self.say(res.splitlines()[0])
+            self.pick_model()   # the preview reads the copy the game would load
+            messagebox.showinfo('Imported', (chr(10) * 2).join([
+                res, how, 'Only vertex positions (and the normals of moved vertices) change. Not tried in the game by this tool.']),
+                parent=self.root)
+        self.work('Importing %s into %s...' % (os.path.basename(obj), mod), lambda: self.be.import_model(model, obj, mod), done)
 
     # --- recolour and outside editing (previewed on the texture and the model before importing)
     def end_override(self):

@@ -133,6 +133,27 @@ def models():
         drawn = int((img != img[0, 0]).any(2).sum())
         check(len(m.meshes) > 0 and drawn > 200, '%s: %d meshes, %d triangles, %d pixels drawn' % (
             name, len(m.meshes), sum(len(x.tris) for x in m.meshes), drawn))
+    # model import: an unchanged OBJ gives the same bytes; a moved mesh comes back where it was put, rigid parts included
+    import model_import
+    import numpy as np
+    name = 'Player_Adult.Player_Adult'
+    with tempfile.TemporaryDirectory() as tmp:
+        data, _ = tt.unzs(os.path.join(ROMFS, 'Model', name + '.bfres.zs'), ROMFS, tmp)
+    m = bfres_model.parse(data, name)
+    same, n0 = model_import.apply(data, m, [x.pos for x in m.meshes])
+    rigid = next(i for i, x in enumerate(m.meshes) if x.src['place'])
+    new = [x.pos + ((0, 0.05, 0) if i in (0, rigid) else 0) for i, x in enumerate(m.meshes)]
+    out, moved = model_import.apply(data, m, new)
+    m2 = bfres_model.parse(out, name)
+    err = max(float(np.abs(b.pos - w).max()) for b, w in zip(m2.meshes, new))
+    check(same == data and n0 == 0 and len(out) == len(data) and moved == len(m.meshes[0].pos) + len(m.meshes[rigid].pos)
+          and err < 1e-4, 'model import (%s): unchanged OBJ gives the same file; moved %d vertices, largest error %.6f' % (
+              name, moved, err))
+    try:
+        model_import.match(m.meshes, [('x', np.zeros((5, 3)))])
+        check(False, 'model import: a different mesh should be refused')
+    except model_import.ImportError_:
+        check(True, 'model import: a different mesh is refused')
 
 
 def levels(work):

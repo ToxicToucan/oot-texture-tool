@@ -55,6 +55,11 @@ def mod_texture(mods, name):
     return None
 
 
+def model_file(romfs, name):
+    """The .bfres.zs to read (the texture tool's window points this at a mod's copy when one wins)."""
+    return os.path.join(romfs, 'Model', name + '.bfres.zs')
+
+
 def write_obj(model, folder, tex_of_material):
     """<model>.obj and <model>.mtl; returns (vertices, triangles)."""
     base = model.name
@@ -109,10 +114,10 @@ def main():
         return 0
     if not a.model or not a.out:
         ap.error('give a model name and an output folder (or --list)')
-    src = os.path.join(romfs, 'Model', a.model + '.bfres.zs')
+    src = model_file(romfs, a.model)
     if not os.path.exists(src) and '.' not in a.model:   # "Player_Child" for the file Player_Child.Player_Child
         a.model = a.model + '.' + a.model
-        src = os.path.join(romfs, 'Model', a.model + '.bfres.zs')
+        src = model_file(romfs, a.model)
     if not os.path.exists(src):
         raise SystemExit('no model %s in %s (try --list %s)' % (a.model, os.path.join(romfs, 'Model'), a.model.split('_')[0]))
     with tempfile.TemporaryDirectory() as tmp:

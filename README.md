@@ -138,10 +138,15 @@ If your mod includes an ASTC texture, also share the `~Size table (made by the t
   - It suits colour changes like hair, tunics and gems.
 - **Edit in paint program** opens the texture in your default image editor. Each time you save there, the tool's preview (texture or model) updates within a second. When you're happy, click **Import edited file**.
 - **Remove from mod** (when **Show** is on a mod's copy) deletes that mod's copy of the texture, after asking. The game's own texture is never touched.
-- **Export its textures...** (in the model view) saves every texture of the shown model as PNGs, for repainting a whole character.
+- **Export textures...** (in the model view) saves every texture of the shown model as PNGs, for repainting a whole character.
 - **Import folder...** (top right) imports every PNG or DDS in a folder that is named like a texture into one mod, so you can repaint a whole character and bring it all back at once. Files with other names are listed and skipped.
 - The model view shows your whole mod: every part of the model uses the copy the game would load.
-- **Export model (OBJ)...** (in the model view, and **Export (OBJ)...** in the Models tab for the selected model) saves the model as OBJ + MTL with its colour textures as PNGs, for Blender and other 3D programs. Textures come from the copy the game would load, so your mods show. Meshes are in the model's rest pose; no skeleton or animation.
+- **Export OBJ...** (in the model view, and **Export (OBJ)...** in the Models tab for the selected model) saves the model as OBJ + MTL with its colour textures as PNGs, for Blender and other 3D programs. Textures come from the copy the game would load, so your mods show. Meshes are in the model's rest pose; no skeleton or animation.
+- **Import OBJ...** (in the model view) puts an edited model back: the vertex positions of an OBJ that **Export OBJ...** wrote, after you move vertices in Blender, ZBrush or another program, go into a mod's copy of the model (`<mods>\<mod>\romfs\Model\`). The preview then shows the mod's copy.
+  - **Same mesh only:** keep every vertex and its order. Move, sculpt and smooth, but don't add, delete, merge, remesh or subdivide. In ZBrush, sculpt with subdivision levels and export at the lowest one; DynaMesh, ZRemesher and Sculptris Pro change the mesh. In Blender, keep the vertex order (no merge by distance) and export OBJ with the default axes.
+  - Normals of moved vertices follow the new shape; UVs, skin weights, the skeleton and the file's size stay the same, so the size table needs no change. Skinned parts are edited in their rest pose.
+  - For fine detail, bake a normal map in your 3D program and import it as the model's `_Nrm` texture instead.
+  - Not tried in the game yet.
 
 ![Recolouring adult Link's hair, previewed on the model](docs/screenshot-recolour.png)
 
@@ -369,6 +374,7 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 | `phive_shape.py` | Reads collision shapes, drawn grey for terrain whose own mesh can't be read |
 | `phive_compound.py` | Reads a level's static collision, for terrain pieces without a shape of their own |
 | `terrain.py` | Reads a level's heightmaps (`TerrainArc`) and builds its ground |
+| `model_import.py` | Puts an edited OBJ's vertex positions into a mod's copy of the model (also from the command line) |
 | `texture_tests.py` | Regression checks (runs in a temporary folder): `py -3.12 texture_tests.py` |
 | `texconv.cpp`, `build-texconv.cmd` | The codec helper (ASTC decode; BC1, BC3, BC4, BC5, BC7 encode) and its build script |
 | `textures/` | The `astc2bc7` library that `texconv` links (ASTC decode, BC7 encode) |
