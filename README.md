@@ -6,8 +6,9 @@
 
 - **Find** any of the game's 20,000+ textures by typing part of its name.
 - **Preview** the texture, with its format, size, mip levels and whether it can be imported.
-- **Export** it as a PNG to edit in any paint program.
-- **Import** your edited PNG into a mod folder. Every mip level is rebuilt from your image. BC7 and ASTC textures can be imported.
+- **Export** it as a PNG to edit in any paint program, or as a DDS in its own format.
+- **Import** your edited PNG or DDS into a mod folder. Every mip level is rebuilt from your image. BC1, BC3, BC4, BC5, BC7 and ASTC textures can be imported: about 97% of the game's textures.
+- **See your mod's version** right away. Textures your mods replace are marked ◆, and **Show** flips between the original and each mod's copy.
 
 The tool only reads the game's files. It writes to your mod folder and nowhere else.
 
@@ -87,10 +88,13 @@ As an example, this guide recolours adult Link's hair.
    - **Keep the same width and height.**
    - **Keep the transparency.** See-through areas (the checkerboard in the preview) matter.
    - Save as PNG.
-5. **Import.** Back in the tool, with the same texture selected, click **Import PNG...**.
+5. **Import.** Back in the tool, with the same texture selected, click **Import PNG or DDS...**.
    1. Pick your edited PNG.
    2. Choose a mod, or choose **New mod...** and type a name such as `Pink hair`.
    3. Wait a few seconds while it encodes every mip level.
+   4. The preview now shows your version. Use **Show** to compare it with the original.
+
+![The window after importing a pink version](docs/screenshot-mod.png)
 6. **Turn it on.** Open the game's **Mods** tab, turn your mod on, then restart the game.
    - If the tool made the **`~Size table (made by the texture tool)`** mod (see [ASTC textures and the size table](#astc-textures-and-the-size-table)), turn that on too, and keep it last.
 
@@ -146,13 +150,33 @@ The tool refuses any mods folder that overlaps the game's romfs, `merged\bin` or
 
 | Format | Export | Import |
 | --- | --- | --- |
-| BC7 | Yes | **Yes** |
-| ASTC (all block sizes) | Yes | **Yes**, saved as BC7 |
-| BC1 to BC6H | Yes | Not yet |
+| BC1, BC3, BC7 (colour) | Yes | **Yes**, same format and file size |
+| BC4 (one channel), BC5 (two channels) | Yes | **Yes**, same format and file size |
+| ASTC (all block sizes) | Yes | **Yes**, saved as BC7 (see below) |
+| BC2, BC6H (HDR lighting) | Yes | No |
 
-The panel tells you which applies when you pick a texture.
+The panel tells you which applies when you pick a texture. In a sample of every 20th texture, ASTC was 54%, BC4 35%, and BC1, BC5 and BC7 about 4% each. BC6H was 3% and BC3 under 1%.
 
-Quality: exporting, importing unchanged and exporting again changes the image by an amount you can't see. That's PSNR 56.7 dB for BC7 (`Mt_Hairs_Player_Adult_Alb`) and 82.0 dB for ASTC (`Player_Adult_Hair_Alb`).
+- **BC1:** cut-outs (leaves, flowers, fences) keep their transparency. Pixels under half alpha become fully transparent.
+- **BC4** holds one channel, often grey data maps (`_AO`, `_Rgh`, `_Trs`). The tool uses the grey value of your image.
+- **BC5** holds two channels (red and green), often normal maps.
+- **Signed (SNORM) BC4/BC5** are shown shifted by 128: 0 means -1, 128 means 0 and 255 means +1. Import undoes the shift.
+
+**DDS files:** **Export DDS...** saves BC1 to BC7 textures in their own format with every mip level, for paint programs that edit DDS (for example Paint.NET, or Photoshop with the Intel plugin). A DDS you import must be in the texture's format and size. Its blocks are used exactly as they are, mip levels included, and any missing levels are made from the first one.
+
+Quality: exporting, importing unchanged and exporting again changes the image by an amount you can't see:
+
+| Format | Texture | PSNR |
+| --- | --- | --- |
+| BC1 | `Cloth_LonLon_FlagFence_B_01_Alb` (cut-outs) | 64.0 dB |
+| BC3 | `Cloth_Zora_Carpet_C_Alb` | 45.5 dB |
+| BC4 | `Bomb_Leaf_Trs` | 50.2 dB |
+| BC5 | `Grain_Rock_00_Nrm` | 60.0 dB |
+| BC5 SNORM | `Smoke_Thin_DryIce_01_Dst` | 90.6 dB |
+| BC7 | `Mt_Hairs_Player_Adult_Alb` | 56.7 dB |
+| ASTC to BC7 | `Player_Adult_Hair_Alb` | 82.0 dB |
+
+A DDS exported and imported again gives identical data for every BC format.
 
 ### ASTC textures and the size table
 
@@ -170,7 +194,7 @@ mods\
 - It covers **all** the mods in the folder, not just the last one you imported.
 - It isn't shown in the import list, and nothing else can be imported into it.
 - If you delete a mod or copy one in by hand, click **Rebuild size table** (top right). If no mod needs a bigger entry, the table is removed.
-- Only BC7 imports never need it. The game's own size table is never changed.
+- BC1, BC3, BC4, BC5 and BC7 imports never need it. The game's own size table is never changed.
 
 ![An ASTC texture in the window](docs/screenshot-astc.png)
 
@@ -184,11 +208,12 @@ The window drives `texture_tool.py`, which you can also run directly:
 
 ```bat
 py -3.12 texture_tool.py export <romfs>\Tex\Player_Child_Face_Alb.bntx.zs face.png
+py -3.12 texture_tool.py export-dds <romfs>\Tex\Bomb_Leaf_Trs.bntx.zs leaf.dds
 py -3.12 texture_tool.py import <romfs>\Tex\Player_Child_Face_Alb.bntx.zs face.png "<mods>\My face mod"
 py -3.12 texture_tool.py sizes <mods>
 ```
 
-`sizes` rebuilds the size table mod, the same as the **Rebuild size table** button.
+`import` takes a PNG or a DDS. `sizes` rebuilds the size table mod, the same as the **Rebuild size table** button.
 
 Environment variables: `TEXCONV_DIR` (folder with `texconv.exe`), `PY_ZSTD` (the Python 3.14+ command), and `OOT_ROMFS` (the game romfs, if the texture is not inside one).
 
@@ -202,7 +227,9 @@ Environment variables: `TEXCONV_DIR` (folder with `texconv.exe`), `PY_ZSTD` (the
 | *"py -3.15" did not run Python 3.14+* | Install Python 3.14 or later, or change the command in Settings to the version you have. |
 | *The game textures folder was not found* | Set **Game romfs folder** to the folder that contains `Tex` and `Pack`. |
 | *Wrong PNG size* | Resize the PNG to exactly the size shown in the panel. Editing the exported PNG keeps it right. |
-| *cannot be imported yet* | The texture is BC1 to BC6H. See [What can be imported](#what-can-be-imported). |
+| *cannot be imported* | The texture is BC2 or BC6H. See [What can be imported](#what-can-be-imported). |
+| *Wrong DDS format* | Save the DDS in the format the panel shows (the mod's copy of an ASTC texture is BC7), or import a PNG instead. |
+| *unknown command encode-bc1* or similar | Your `texconv.exe` is from v0.1 or v0.2. Get `texconv-windows-x64.zip` from the latest release. |
 | *Pillow missing* | Run `py -3.12 -m pip install pillow`. |
 | Nothing happens on double-click | Make sure Python 3.12 is installed with the py launcher, then try `py -3.12 texture_gui.pyw` in a Command Prompt to see the error. |
 | My change doesn't show in game | Turn the mod on in the **Mods** tab and restart the game. A mod later in the load order wins if two change the same file. |
@@ -222,9 +249,9 @@ build-texconv.cmd
 
 1. The first command fetches the pinned versions of astc-encoder, bc7enc_rdo and ISPC into `textures\third_party`. The exact versions are listed in [textures/THIRD_PARTY.md](textures/THIRD_PARTY.md).
 2. The second builds the `astc2bc7` library into `textures\build\release`.
-3. The third builds `texconv.exe` next to the tool and copies the DLLs it needs.
+3. The third builds `texconv.exe` next to the tool and copies the DLLs it needs. It also compiles `rgbcx.cpp`, bc7enc_rdo's BC1 to BC5 codec, from `textures\third_party\bc7enc_rdo`.
 
-If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>` first.
+If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>` first. To use a bc7enc_rdo copy kept elsewhere, set `RGBCX_DIR`.
 
 ---
 
@@ -232,8 +259,9 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 
 - The game's textures are `.bntx.zs` files: Nintendo BNTX texture containers, zstd-compressed with dictionaries stored in the game's own `Pack\ZsDic.pack.zs`. `zs_helper.py` handles that step on Python 3.14+.
 - Texture data on the console is stored in GPU "block-linear" order: GOBs of 64 bytes by 8 rows, stacked in blocks. The order of bytes *inside* a GOB on Switch 2 differs from the original Switch. It was found by testing all orders against the game's own textures; see `swizzle_offsets` in `texture_tool.py`.
-- `texconv.exe` decodes ASTC (ARM astcenc) and encodes BC7 (Binomial bc7e).
-- On import, every mip level is downscaled from your PNG, encoded as BC7, put back into block-linear order, and recompressed with the same dictionary. A BC7 texture keeps its exact size.
+- `texconv.exe` decodes ASTC (ARM astcenc), encodes BC7 (Binomial bc7e), and encodes BC1, BC3, BC4 and BC5 (rgbcx). BC1 blocks with transparent pixels use BC1's 3-colour mode, where the fourth index is transparent.
+- On import, every mip level is downscaled from your PNG, encoded in the texture's format, put back into block-linear order, and recompressed with the same dictionary. BC textures keep their exact size.
+- Signed BC4/BC5 blocks become unsigned by flipping the top bit of their two endpoint bytes. That keeps the block's mode and steps, so the round trip is exact.
 - An ASTC texture's container is laid out again for BC7: new mip offsets, then the data block, relocation table and header pointers are moved. The resource size table (CRC32 of each file's path, mapped to the size it needs: unpacked size + 280 for textures) is merged for every mod into the size table mod.
 
 | File | Purpose |
@@ -242,7 +270,7 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 | `texture_gui.pyw` | The window (Tkinter) |
 | `texture_tool.py` | Export and import; also a command-line tool |
 | `zs_helper.py` | zstd with the game's dictionaries |
-| `texconv.cpp`, `build-texconv.cmd` | The codec helper and its build script |
+| `texconv.cpp`, `build-texconv.cmd` | The codec helper (ASTC decode; BC1, BC3, BC4, BC5, BC7 encode) and its build script |
 | `textures/` | The `astc2bc7` library that `texconv` links (ASTC decode, BC7 encode) |
 
 ---
@@ -251,7 +279,7 @@ If LLVM is not in `C:\Program Files\LLVM`, run `set LLVM_DIR=<your LLVM folder>`
 
 - This tool is licensed under the **GNU GPL v3.0 or later**; see [LICENSE](LICENSE).
 - [ARM astc-encoder](https://github.com/ARM-software/astc-encoder) (Apache-2.0) decodes ASTC.
-- [bc7enc_rdo / bc7e](https://github.com/richgel999/bc7enc_rdo) by Richard Geldreich, Jr. and Binomial LLC (Apache-2.0, plus MIT or public domain for the rest) encodes BC7.
+- [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo) by Richard Geldreich, Jr. and Binomial LLC: bc7e (Apache-2.0) encodes BC7, and rgbcx (MIT or public domain) encodes BC1 to BC5.
 - [Intel ISPC](https://github.com/ispc/ispc) (BSD-3-Clause) compiles bc7e.
 - The BNTX field layout follows the notes in [Switch-Toolbox](https://github.com/KillzXGaming/Switch-Toolbox).
 

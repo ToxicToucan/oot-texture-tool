@@ -2,14 +2,18 @@
 """Texture exporter / importer for Ocarina of Time (Switch 2) mods.
 
   python texture_tool.py export <romfs\\Tex\\name.bntx.zs> <out.png>
-  python texture_tool.py import <romfs\\Tex\\name.bntx.zs> <edited.png> <mod folder>
+  python texture_tool.py export-dds <romfs\\Tex\\name.bntx.zs> <out.dds>
+  python texture_tool.py import <romfs\\Tex\\name.bntx.zs> <edited.png or .dds> <mod folder>
+  python texture_tool.py sizes <mods folder>
 
-export: the texture's full-size image (mip 0) as a PNG. ASTC and BC1..BC7 textures.
-sizes:  python texture_tool.py sizes <mods folder>   rebuilds the merged resource size table for all mods.
-
-import: the PNG (same size as the texture) back into a copy of the texture under <mod folder>\\romfs\\Tex\\, every mip level
-        made from it, for the menu's Mods tab. This version imports into BC7 textures (the file keeps its size, so the game's
-        resource size table needs no change); ASTC textures are exported fine but not yet imported.
+export:     the texture's full-size image (mip 0) as a PNG. ASTC and BC1..BC7 textures. BC4/BC5 SNORM data is shown shifted
+            by 128 (0 = -1, 128 = 0, 255 = +1); BC4 as grey, BC5 as red and green.
+export-dds: BC1..BC7 textures in their own format with every mip level, for paint programs that edit DDS.
+import:     the PNG (same size as the texture) back into a copy of the texture under <mod folder>\\romfs\\Tex\\, every mip
+            level made from it, for the menu's Mods tab. BC1, BC3, BC4, BC5 and BC7 keep their format (and the file its
+            size); ASTC becomes BC7 and the game's resource size table is raised in its own mod. A .dds in the texture's
+            format is taken as it is (its mip levels too; missing ones are made from its first level). BC2 and BC6H: export only.
+sizes:      rebuilds the merged resource size table for all mods.
 
 Runs on Python 3 with Pillow; the zstd step runs zs_helper.py on Python 3.14+ (compression.zstd; PY_ZSTD, default
 "py -3.15"). texconv.exe (build-texconv.cmd) next to this file or in TEXCONV_DIR. The zstd dictionaries come from the game's own Pack/ZsDic.pack.zs. Nothing in the game folder is written.
@@ -95,6 +99,7 @@ class Texture:
         self.data_start = self.mip_offsets[0]
         self.kind = self.fmt >> 8
         self.srgb = (self.fmt & 0xff) == 0x06
+        self.snorm = (self.fmt & 0xff) == 0x02   # signed (BC4/BC5 SNORM; BC6H SF16)
         if self.kind in ASTC_BLOCKS:
             self.bw, self.bh = ASTC_BLOCKS[self.kind]
             self.bpb = 16
@@ -188,11 +193,25 @@ def decode_mip0(src):
             run('decode-astc', bp, rp, w, h, t.bw, t.bh, 'srgb' if t.srgb else 'linear')
             img = Image.frombytes('RGBA', (w, h), open(rp, 'rb').read())
         else:
-            dxgi = BC[t.kind][2] + (1 if t.srgb and t.kind in (0x1a, 0x1b, 0x1c, 0x20) else 0)
-            hdr = b'DDS ' + struct.pack('<7I44x', 124, 0x1007, h, w, len(blocks), 0, 1) + struct.pack('<2I4s20x', 32, 4, b'DX10')
-            hdr += struct.pack('<5I', 0x1000, 0, 0, 0, 0) + struct.pack('<5I', dxgi, 3, 0, 1, 0)
-            img = Image.open(io.BytesIO(hdr + blocks)).convert('RGBA')
+            img = bc_image(t.kind, w, h, snorm_flip(t, blocks), t.snorm)   # BC4/BC5 SNORM shown shifted by 128
     return t, img
+
+
+PILLOW_FOURCC = {0x1a: b'DXT1', 0x1b: b'DXT3', 0x1c: b'DXT5', 0x1d: b'ATI1', 0x1e: b'ATI2'}
+
+
+def bc_image(kind, w, h, blocks, snorm=False):
+    """BC1..BC7 blocks (row-major) as a Pillow RGBA image. sRGB data decodes to the same bytes as UNORM, so the UNORM
+    form is used; Pillow reads BC1..BC5 only with the old FourCC header and BC6H/BC7 only with the DX10 one."""
+    from PIL import Image
+    if kind in PILLOW_FOURCC:
+        hdr = b'DDS ' + struct.pack('<7I44x', 124, 0x81007, h, w, len(blocks), 0, 1)
+        hdr += struct.pack('<2I4s20x', 32, 4, PILLOW_FOURCC[kind]) + struct.pack('<5I', 0x1000, 0, 0, 0, 0)
+    else:
+        dxgi = (96 if snorm else 95) if kind == 0x1f else 98
+        hdr = b'DDS ' + struct.pack('<7I44x', 124, 0x81007, h, w, len(blocks), 0, 1) + struct.pack('<2I4s20x', 32, 4, b'DX10')
+        hdr += struct.pack('<5I', 0x1000, 0, 0, 0, 0) + struct.pack('<5I', dxgi, 3, 0, 1, 0)
+    return Image.open(io.BytesIO(hdr + blocks)).convert('RGBA')
 
 
 def export_png(src, png):
@@ -346,7 +365,66 @@ def merge_sizes(mods_dir, romfs=None):
     return raised
 
 
+ENCODE = {0x1a: ('encode-bc1', 12), 0x1c: ('encode-bc3', 12), 0x1d: ('encode-bc4', 0), 0x1e: ('encode-bc5', 0),
+          0x20: ('encode-bc7', 4)}   # texconv command and quality level per format the tool can write
+_FLIP = bytes(range(128, 256)) + bytes(range(128))   # x ^ 0x80
+
+
+def snorm_flip(t, blocks):
+    """BC4/BC5 SNORM <-> UNORM blocks: the endpoint bytes XOR 0x80 (signed -128..127 <-> 0..255, same order and steps, so
+    the same block mode). Exports show SNORM data shifted by 128 (0 = -1, 128 = 0, 255 = +1); imports undo it."""
+    if not (t.snorm and t.kind in (0x1d, 0x1e)):
+        return blocks
+    b = bytearray(blocks)
+    for o in ((0, 1) if t.kind == 0x1d else (0, 1, 8, 9)):
+        b[o::t.bpb] = b[o::t.bpb].translate(_FLIP)
+    return bytes(b)
+
+
+DDS_FOURCC = {b'DXT1': 71, b'DXT2': 74, b'DXT3': 74, b'DXT4': 77, b'DXT5': 77, b'ATI1': 80, b'BC4U': 80, b'BC4S': 81,
+              b'ATI2': 83, b'BC5U': 83, b'BC5S': 84}
+DXGI_KIND = {70: 0x1a, 71: 0x1a, 72: 0x1a, 73: 0x1b, 74: 0x1b, 75: 0x1b, 76: 0x1c, 77: 0x1c, 78: 0x1c, 79: 0x1d, 80: 0x1d,
+             81: 0x1d, 82: 0x1e, 83: 0x1e, 84: 0x1e, 94: 0x1f, 95: 0x1f, 96: 0x1f, 97: 0x20, 98: 0x20, 99: 0x20}
+DXGI_NAME = {0x1a: 'BC1', 0x1b: 'BC2', 0x1c: 'BC3', 0x1d: 'BC4', 0x1e: 'BC5', 0x1f: 'BC6H', 0x20: 'BC7'}
+
+
+def read_dds(path):
+    """(dxgi format, width, height, [mip level block data, ...]) of a block-compressed .dds file."""
+    d = open(path, 'rb').read()
+    if d[:4] != b'DDS ' or len(d) < 128:
+        raise ToolError('%s is not a DDS file' % os.path.basename(path))
+    h, w = struct.unpack_from('<II', d, 12)
+    mips = max(1, struct.unpack_from('<I', d, 28)[0])
+    fourcc = d[84:88]
+    if fourcc == b'DX10':
+        dxgi, dim, _, arr = struct.unpack_from('<IIII', d, 128)
+        off = 148
+        if arr > 1:
+            raise ToolError('%s is a texture array; save a single 2D texture' % os.path.basename(path))
+    else:
+        dxgi, off = DDS_FOURCC.get(fourcc), 128
+    if dxgi not in DXGI_KIND:
+        raise ToolError('%s is not saved as BC1 to BC7 (DXGI format %s). Save it as BC1, BC3, BC4, BC5 or BC7, or use a PNG.'
+                        % (os.path.basename(path), dxgi if dxgi is not None else fourcc.decode('latin-1')))
+    bpb = 8 if DXGI_KIND[dxgi] in (0x1a, 0x1d) else 16
+    levels = []
+    for m in range(mips):
+        lw, lh = max(1, w >> m), max(1, h >> m)
+        n = ((lw + 3) // 4) * ((lh + 3) // 4) * bpb
+        if off + n > len(d):
+            break
+        levels.append(d[off:off + n])
+        off += n
+    return dxgi, w, h, levels
+
+
+def dds_signed(dxgi):
+    return dxgi in (81, 84)
+
+
 def import_png(src, png, mod):
+    """Import a PNG (or a .dds already in the texture's format) into the mod's copy of the texture. BC1, BC3, BC4, BC5 and
+    BC7 keep their format and size; ASTC becomes BC7 (the size table is raised). Returns the written path."""
     from PIL import Image
     inside = find_romfs(src)
     romfs = game_romfs(inside)
@@ -356,17 +434,38 @@ def import_png(src, png, mod):
     t = Texture(d)
     if t.kind in ASTC_BLOCKS:
         t = to_bc7_layout(t)   # ASTC: the mod's copy becomes BC7 (bigger, so the size table is raised below)
-    elif t.kind != 0x20:
-        raise ToolError('%s is %s: imports go into BC7 and ASTC textures (export works for all)' %
-                         (os.path.basename(src), format_name(t)))
-    img = Image.open(png).convert('RGBA')
-    if img.size != (t.w, t.h):
-        raise ToolError('the PNG is %dx%d; the texture is %dx%d' % (img.size[0], img.size[1], t.w, t.h))
+    elif t.kind not in ENCODE:
+        raise ToolError('%s is %s: imports go into BC1, BC3, BC4, BC5, BC7 and ASTC textures (export works for all)' %
+                        (os.path.basename(src), format_name(t)))
+    given = []   # mip levels taken as they are from a .dds
+    if png.lower().endswith('.dds'):
+        dxgi, w, h, levels = read_dds(png)
+        if DXGI_KIND[dxgi] != t.kind:
+            raise ToolError('the DDS is %s; %s needs %s%s (or use a PNG)' % (
+                DXGI_NAME[DXGI_KIND[dxgi]], os.path.basename(src), DXGI_NAME[t.kind],
+                ' (the mod\'s copy of this ASTC texture is BC7)' if t.fmt != Texture(d).fmt else ''))
+        if (w, h) != (t.w, t.h):
+            raise ToolError('the DDS is %dx%d; the texture is %dx%d' % (w, h, t.w, t.h))
+        flip = dds_signed(dxgi) != t.snorm and t.kind in (0x1d, 0x1e)
+        given = [snorm_flip(t, lv) if flip else lv for lv in levels[:t.mips]]
+        # the levels the DDS lacks are made from its first level (in the shifted form exports use for SNORM)
+        img = bc_image(t.kind, t.w, t.h, snorm_flip(t, given[0]), t.snorm) if len(given) < t.mips else None
+    else:
+        img = Image.open(png).convert('RGBA')
+        if img.size != (t.w, t.h):
+            raise ToolError('the PNG is %dx%d; the texture is %dx%d' % (img.size[0], img.size[1], t.w, t.h))
+    cmd, quality = ENCODE[t.kind]
     with tempfile.TemporaryDirectory() as tmp:
         for m in range(t.mips):
+            if m < len(given):
+                write_mip_blocks(t, m, given[m])
+                continue
             w, h, wb, hb = t.mip_dims(m)
             level = img if m == 0 else img.resize((w, h), Image.LANCZOS)
-            # BC7 works on 4x4 blocks: a level smaller than a block is padded (its edge repeated)
+            if t.kind == 0x1d:   # BC4: one channel, from the grey value
+                g = level.convert('L')
+                level = Image.merge('RGBA', (g, g, g, Image.new('L', g.size, 255)))
+            # block formats work on 4x4 blocks: a level smaller than a block is padded (its edge repeated)
             pw, ph = wb * 4, hb * 4
             if (pw, ph) != (w, h):
                 padded = Image.new('RGBA', (pw, ph))
@@ -375,24 +474,47 @@ def import_png(src, png, mod):
                 level = padded
             rp, bp = os.path.join(tmp, 'p%d.rgba' % m), os.path.join(tmp, 'b%d.bin' % m)
             open(rp, 'wb').write(level.tobytes())
-            run('encode-bc7', rp, bp, pw, ph, 4)
-            write_mip_blocks(t, m, open(bp, 'rb').read())
+            run(cmd, rp, bp, pw, ph, quality)
+            write_mip_blocks(t, m, snorm_flip(t, open(bp, 'rb').read()))
     rel = os.path.relpath(os.path.abspath(src), inside) if inside else os.path.join('Tex', os.path.basename(src))
     dst = os.path.join(mod, 'romfs', rel)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     zs(bytes(t.d), romfs, dct, dst, tmp0)
     tmp_obj.cleanup()
-    print('%s: %d mip levels encoded as BC7 -> %s' % (os.path.basename(src), t.mips, dst))
+    print('%s: %d mip levels as %s%s -> %s' % (os.path.basename(src), t.mips, format_name(t),
+                                               ' (%d from the DDS)' % len(given) if given else '', dst))
     raised = merge_sizes(os.path.dirname(os.path.abspath(mod)), romfs)
     if raised:
         print('size table: %d entries raised in "%s" (keep that mod on and last)' % (raised, SIZE_MOD))
     return dst
 
 
+def export_dds(src, dds):
+    """The texture in its own format with every mip level, as a DDS (BC1 to BC7; ASTC has no common DDS form)."""
+    romfs = game_romfs(find_romfs(src))
+    with tempfile.TemporaryDirectory() as tmp:
+        t = Texture(unzs(src, romfs, tmp)[0])
+    if t.kind in ASTC_BLOCKS:
+        raise ToolError('%s is %s: paint programs cannot open ASTC DDS files, so export it as a PNG' %
+                        (os.path.basename(src), format_name(t)))
+    dxgi = BC[t.kind][2] + (1 if t.srgb and t.kind in (0x1a, 0x1b, 0x1c, 0x20) else 0) + (1 if t.snorm else 0)
+    if t.kind == 0x1f:
+        dxgi = 96 if t.snorm else 95
+    data = b''.join(read_mip_blocks(t, m) for m in range(t.mips))
+    first = len(read_mip_blocks(t, 0))
+    hdr = b'DDS ' + struct.pack('<7I44x', 124, 0x1 | 0x2 | 0x4 | 0x1000 | 0x20000 | 0x80000, t.h, t.w, first, 0, t.mips)
+    hdr += struct.pack('<2I4s20x', 32, 4, b'DX10') + struct.pack('<5I', 0x1000 | 0x400000 | 0x8, 0, 0, 0, 0)
+    hdr += struct.pack('<5I', dxgi, 3, 0, 1, 0)
+    open(dds, 'wb').write(hdr + data)
+    print('%s: %s %dx%d, %d mip levels -> %s' % (os.path.basename(src), format_name(t), t.w, t.h, t.mips, dds))
+    return t
+
 if __name__ == '__main__':
     try:
         if len(sys.argv) == 4 and sys.argv[1] == 'export':
             export_png(sys.argv[2], sys.argv[3])
+        elif len(sys.argv) == 4 and sys.argv[1] == 'export-dds':
+            export_dds(sys.argv[2], sys.argv[3])
         elif len(sys.argv) == 5 and sys.argv[1] == 'import':
             import_png(sys.argv[2], sys.argv[3], sys.argv[4])
         elif len(sys.argv) == 3 and sys.argv[1] == 'sizes':

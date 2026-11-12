@@ -18,8 +18,10 @@ if not defined VSDIR (echo Visual Studio with the C++ tools was not found & exit
 call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 if not defined LLVM_DIR set "LLVM_DIR=%ProgramFiles%\LLVM"
 set "PATH=%LLVM_DIR%\bin;%PATH%"
+if not defined RGBCX_DIR set "RGBCX_DIR=%~dp0textures\third_party\bc7enc_rdo"
+if not exist "%RGBCX_DIR%\rgbcx.cpp" (echo rgbcx.cpp not found in %RGBCX_DIR%: run step 1, or set RGBCX_DIR & exit /b 1)
 if not exist "%OUT%" mkdir "%OUT%"
-clang-cl /nologo /O2 /EHsc /std:c++17 /MD /I"%~dp0textures\include" "%~dp0texconv.cpp" /Fe"%OUT%\texconv.exe" /Fo"%OUT%\texconv.obj" ^
-  /link "%LIBDIR%\astc2bc7.lib" "%LIBDIR%\bc7e_ispc.lib" || exit /b 1
+clang-cl /nologo /O2 /EHsc /std:c++17 /MD /I"%~dp0textures\include" /I"%RGBCX_DIR%" "%~dp0texconv.cpp" "%RGBCX_DIR%\rgbcx.cpp" ^
+  /Fe"%OUT%\texconv.exe" /Fo"%OUT%\\" /link "%LIBDIR%\astc2bc7.lib" "%LIBDIR%\bc7e_ispc.lib" || exit /b 1
 copy /y "%LIBDIR%\astcdec-*-shared.dll" "%OUT%\" >nul
 echo built %OUT%\texconv.exe

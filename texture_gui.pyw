@@ -27,6 +27,8 @@ import texture_tool as tt  # noqa: E402
 TOOL_ERRORS = (SystemExit,) + ((tt.ToolError,) if hasattr(tt, "ToolError") else ())
 ASTC_IMPORT = hasattr(tt, 'to_bc7_layout')          # ASTC textures are imported as BC7
 SIZE_MOD = getattr(tt, 'SIZE_MOD', None)            # the mod holding the merged resource size table
+ENCODABLE = set(getattr(tt, 'ENCODE', {0x20: None}))   # formats imports keep (BC7, and BC1/BC3/BC4/BC5 in newer tools)
+ENCODABLE_NAMES = ', '.join(tt.BC[k][0] for k in sorted(ENCODABLE)) + (' and ASTC' if ASTC_IMPORT else '')
 
 CONFIG = os.path.join(os.environ.get('LOCALAPPDATA', HERE), 'oot-texture-gui.json')
 DEFAULTS = {
@@ -145,41 +147,74 @@ class Backend:
     def path(self, name):
         return os.path.join(self.tex_dir, name)
 
-    def decode(self, name):
-        """(info dict, mip 0 as a PIL RGBA image) for a texture; the same decoding as texture_tool export."""
-        from PIL import Image
-        src = self.path(name)
-        romfs = tt.game_romfs(tt.find_romfs(src))
-        with tempfile.TemporaryDirectory() as tmp:
-            d, _ = tt.unzs(src, romfs, tmp)
-            t = tt.Texture(d)
-            w, h, wb, hb = t.mip_dims(0)
-            blocks = tt.read_mip_blocks(t, 0)
-            if t.kind in tt.ASTC_BLOCKS:
-                bp, rp = os.path.join(tmp, 'b.bin'), os.path.join(tmp, 'p.rgba')
-                open(bp, 'wb').write(blocks)
-                tt.run('decode-astc', bp, rp, w, h, t.bw, t.bh, 'srgb' if t.srgb else 'linear')
-                img = Image.frombytes('RGBA', (w, h), open(rp, 'rb').read())
-            else:
-                dxgi = tt.BC[t.kind][2] + (1 if t.srgb and t.kind in (0x1a, 0x1b, 0x1c, 0x20) else 0)
-                hdr = b'DDS ' + struct.pack('<7I44x', 124, 0x1007, h, w, len(blocks), 0, 1) + struct.pack('<2I4s20x', 32, 4, b'DX10')
-                hdr += struct.pack('<5I', 0x1000, 0, 0, 0, 0) + struct.pack('<5I', dxgi, 3, 0, 1, 0)
-                img = Image.open(io.BytesIO(hdr + blocks)).convert('RGBA')
-                img.load()
-        astc = t.kind in tt.ASTC_BLOCKS
-        info = {'name': name, 'w': t.w, 'h': t.h, 'mips': t.mips, 'srgb': t.srgb,
-                'format': ('ASTC %dx%d' % (t.bw, t.bh)) if astc else tt.BC[t.kind][0],
-                'importable': t.kind == 0x20 or (astc and ASTC_IMPORT), 'astc': astc}
-        if not info['importable']:
-            info['why_not'] = ('ASTC textures export fine but this version cannot import them.' if astc else
-                               '%s textures cannot be imported yet; only BC7%s can.' % (info['format'], ' and ASTC' if ASTC_IMPORT else ''))
-        return info, img
-
-    def export(self, name, png):
+    def decode(self, name, path=None):
+        """(info dict, mip 0 as a PIL RGBA image) for a texture: the game's copy, or a mod's copy at path."""
         try:
-            tt.export_png(self.path(name), png)
+            t, img = tt.decode_mip0(path or self.path(name))
         except TOOL_ERRORS as e:
             raise ToolError(str(e))
+        astc = t.kind in tt.ASTC_BLOCKS
+        importable = astc and ASTC_IMPORT or t.kind in ENCODABLE
+        info = {'name': name, 'w': t.w, 'h': t.h, 'mips': t.mips, 'srgb': t.srgb, 'snorm': getattr(t, 'snorm', False),
+                'format': tt.format_name(t), 'importable': importable, 'astc': astc, 'kind': t.kind,
+                'dds': not astc}
+        if not importable:
+            info['why_not'] = ('ASTC textures export fine but this version cannot import them.' if astc else
+                               '%s textures cannot be imported; only %s can.' % (info['format'], ENCODABLE_NAMES))
+        return info, img
+
+    def export(self, name, out, path=None):
+        """PNG (mip 0) or .dds (every mip level, own format) of the game's copy or a mod's copy."""
+        try:
+            if out.lower().endswith('.dds'):
+                tt.export_dds(path or self.path(name), out)
+            else:
+                tt.export_png(path or self.path(name), out)
+        except TOOL_ERRORS as e:
+            raise ToolError(str(e))
+
+    def mod_order(self):
+        """(load order list, off set) from mods.ini."""
+        order, off = [], set()
+        try:
+            for line in open(os.path.join(self.cfg['mods'], 'mods.ini'), encoding='utf-8'):
+                k, _, v = line.partition('=')
+                items = [x.strip() for x in v.split(',') if x.strip()]
+                if k.strip() == 'order':
+                    order = items
+                elif k.strip() == 'off':
+                    off = set(items)
+        except OSError:
+            pass
+        return order, off
+
+    def modded(self):
+        """{texture file name: [mod, ...]} for every texture some mod replaces."""
+        out = {}
+        for mod in self.mods():
+            d = os.path.join(self.cfg['mods'], mod, 'romfs', 'Tex')
+            try:
+                for f in os.listdir(d):
+                    if f.endswith('.bntx.zs'):
+                        out.setdefault(f, []).append(mod)
+            except OSError:
+                pass
+        return out
+
+    def versions(self, name):
+        """[(label, path or None, is_winner)]: the game's copy, then each mod's copy in load order. The winner is the
+        last mod in the order that is on (what the game shows); mods not in mods.ini yet come after, as not on."""
+        order, off = self.mod_order()
+        mods = [m for m in self.mods() if os.path.exists(os.path.join(self.cfg['mods'], m, 'romfs', 'Tex', name))]
+        mods.sort(key=lambda m: (order.index(m) if m in order else len(order), m.lower()))
+        on = [m for m in mods if m in order and m not in off]
+        winner = on[-1] if on else None
+        out = [('Original (game)', None, winner is None)]
+        for m in mods:
+            state = 'off' if m in off else 'on' if m in order else 'not turned on yet'
+            label = 'Mod: %s (%s%s)' % (m, state, ', shown in game' if m == winner else '')
+            out.append((label, os.path.join(self.cfg['mods'], m, 'romfs', 'Tex', name), m == winner))
+        return out
 
     def mods(self):
         try:
@@ -204,17 +239,7 @@ class Backend:
 
     def mod_state(self, mod):
         """'on', 'off' or 'not listed' from mods.ini (the Mods tab writes it)."""
-        order, off = [], []
-        try:
-            for line in open(os.path.join(self.cfg['mods'], 'mods.ini'), encoding='utf-8'):
-                k, _, v = line.partition('=')
-                items = [x.strip() for x in v.split(',') if x.strip()]
-                if k.strip() == 'order':
-                    order = items
-                elif k.strip() == 'off':
-                    off = items
-        except OSError:
-            pass
+        order, off = self.mod_order()
         return 'off' if mod in off else 'on' if mod in order else 'not listed'
 
     def safe_mod_dir(self, mod):
@@ -237,6 +262,21 @@ class Backend:
         from PIL import Image
         if not info['importable']:
             raise ToolError('%s is %s.\n\n%s' % (info['name'], info['format'], info['why_not']))
+        if png.lower().endswith('.dds'):
+            if not hasattr(tt, 'read_dds'):
+                raise ToolError('This version of texture_tool.py cannot import .dds files; use a PNG.')
+            try:
+                dxgi, w, h, _ = tt.read_dds(png)
+            except TOOL_ERRORS as e:
+                raise ToolError(str(e))
+            want, got = (0x20 if info['astc'] else info['kind']), tt.DXGI_KIND[dxgi]
+            if got != want:
+                raise ToolError('Wrong DDS format: it is %s, but %s needs %s%s.\n\nSave the DDS as %s, or import a PNG.' % (
+                    tt.DXGI_NAME[got], info['name'], tt.DXGI_NAME[want],
+                    ' (the mod\'s copy of an ASTC texture is BC7)' if info['astc'] else '', tt.DXGI_NAME[want]))
+            if (w, h) != (info['w'], info['h']):
+                raise ToolError('Wrong DDS size: it is %d x %d, but %s is %d x %d.' % (w, h, info['name'], info['w'], info['h']))
+            return
         try:
             with Image.open(png) as im:
                 size = im.size
@@ -260,11 +300,15 @@ class Backend:
 
 
 class App:
+    MOD_MARK = '   \u25c6'   # after a name in the list: some mod replaces this texture
+
     def __init__(self, root, cfg):
         self.root, self.cfg = root, cfg
         self.be = Backend(cfg)
         self.names, self.shown = [], []
-        self.info, self.img, self.photo = None, None, None
+        self.info, self.orig, self.img, self.photo = None, None, None, None
+        self.name, self.path, self.versions = None, None, []
+        self.modded = {}
         self.jobs = queue.Queue()
         self.busy = False
         self.cache = {}
@@ -283,11 +327,13 @@ class App:
         ttk.Label(top, text='Search:').pack(side='left')
         self.q = tk.StringVar()
         self.q.trace_add('write', lambda *_: self.filter())
-        e = ttk.Entry(top, textvariable=self.q, width=40)
+        e = ttk.Entry(top, textvariable=self.q, width=34)
         e.pack(side='left', padx=(4, 8))
         e.focus_set()
+        self.only_mod = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text='Modded only', variable=self.only_mod, command=self.filter).pack(side='left')
         self.count = ttk.Label(top, text='')
-        self.count.pack(side='left')
+        self.count.pack(side='left', padx=(8, 0))
         ttk.Button(top, text='Settings...', command=self.settings).pack(side='right')
         ttk.Button(top, text='Open mods folder', command=self.open_mods).pack(side='right', padx=4)
         if SIZE_MOD:
@@ -311,11 +357,20 @@ class App:
         self.details.pack(anchor='w')
         self.canimport = ttk.Label(right, text='', justify='left', wraplength=int(PREVIEW * f))
         self.canimport.pack(anchor='w', pady=(2, 6))
+        vrow = ttk.Frame(right)
+        vrow.pack(anchor='w', fill='x', pady=(0, 6))
+        ttk.Label(vrow, text='Show:').pack(side='left')
+        self.ver = tk.StringVar()
+        self.vercb = ttk.Combobox(vrow, textvariable=self.ver, state='disabled', width=58)
+        self.vercb.pack(side='left', padx=(4, 0))
+        self.vercb.bind('<<ComboboxSelected>>', lambda _: self.pick_version())
         btns = ttk.Frame(right)
         btns.pack(anchor='w', pady=(0, 6))
-        self.bexp = ttk.Button(btns, text='Export PNG...', command=self.export, state='disabled')
+        self.bexp = ttk.Button(btns, text='Export PNG...', command=lambda: self.export('.png'), state='disabled')
         self.bexp.pack(side='left')
-        self.bimp = ttk.Button(btns, text='Import PNG...', command=self.import_, state='disabled')
+        self.bdds = ttk.Button(btns, text='Export DDS...', command=lambda: self.export('.dds'), state='disabled')
+        self.bdds.pack(side='left', padx=(6, 0))
+        self.bimp = ttk.Button(btns, text='Import PNG or DDS...', command=self.import_, state='disabled')
         self.bimp.pack(side='left', padx=6)
         self.canvas = tk.Canvas(right, width=int(PREVIEW * f), height=int(PREVIEW * f), highlightthickness=1,
                                 highlightbackground='#aaa', bg='#ddd')
@@ -367,72 +422,106 @@ class App:
     def startup(self):
         def done(bad, err):
             self.names = self.be.textures()
+            self.modded = self.be.modded()
             self.filter()
             if err or bad:
                 self.error('Something is missing', err or ToolError('\n\n'.join(bad)))
             else:
-                self.say('Ready. %d textures in %s. Mods go to %s' % (len(self.names), self.be.tex_dir, self.cfg['mods']))
+                self.say('Ready. %d textures in %s; %d replaced by mods in %s' % (
+                    len(self.names), self.be.tex_dir, len(self.modded), self.cfg['mods']))
         self.work('Checking the tools...', self.be.check_tools, done)
 
     def filter(self):
         words = self.q.get().lower().split()
-        self.shown = [n for n in self.names if all(w in n.lower() for w in words)]
+        only = self.only_mod.get()
+        self.shown = [n for n in self.names if all(w in n.lower() for w in words) and (not only or n in self.modded)]
         self.lb.delete(0, 'end')
-        self.lb.insert('end', *[n[:-8] for n in self.shown])
+        self.lb.insert('end', *[n[:-8] + (self.MOD_MARK if n in self.modded else '') for n in self.shown])
         self.count.config(text='%d of %d' % (len(self.shown), len(self.names)))
+        if self.name in self.shown:
+            i = self.shown.index(self.name)
+            self.lb.selection_set(i)
+            self.lb.see(i)
 
     def select(self):
         sel = self.lb.curselection()
         if not sel:
             return
         name = self.shown[sel[0]]
-        self.want = name
-        if name in self.cache:
-            self.show(*self.cache[name])
+        self.versions = self.be.versions(name)
+        # what the game shows: the winning mod's copy, or the game's own
+        path = next((p for _, p, win in self.versions if win), None)
+        self.load(name, path)
+
+    def pick_version(self):
+        labels = [v[0] for v in self.versions]
+        if self.name and self.ver.get() in labels:
+            self.load(self.name, self.versions[labels.index(self.ver.get())][1])
+
+    def load(self, name, path):
+        """Show a texture: the game's copy (path None) or a mod's copy."""
+        key = (name, path, os.path.getmtime(path) if path and os.path.exists(path) else 0)
+        self.want = key
+        if key in self.cache:
+            self.show(name, path, *self.cache[key])
             return
         if self.busy:
             return  # picked up when the current job ends
+
+        def job():
+            info, img = self.be.decode(name, path)
+            orig = info if path is None else self.be.decode(name)[0] if (name, None, 0) not in self.cache \
+                else self.cache[(name, None, 0)][0]
+            return orig, info, img
 
         def done(res, err):
             if err:
                 self.show_error(name, err)
             else:
-                self.cache[name] = res
+                self.cache[key] = res
                 if len(self.cache) > 40:
                     self.cache.pop(next(iter(self.cache)))
-                if self.want == name:
-                    self.show(*res)
-            if self.want != name:
-                self.select()
-        self.work('Reading %s...' % name, lambda: self.be.decode(name), done)
+                if self.want == key:
+                    self.show(name, path, *res)
+            if self.want != key and self.want:
+                self.load(*self.want[:2])
+        self.work('Reading %s%s...' % (name, '' if path is None else ' (mod copy)'), job, done)
 
     def show_error(self, name, err):
-        self.info, self.img = None, None
+        self.info, self.orig, self.img = None, None, None
         self.canvas.delete('all')
         self.title.config(text=name[:-8])
         self.details.config(text='Could not read this texture.')
         self.canimport.config(text=str(err), foreground='#a00')
-        self.bexp.config(state='disabled')
-        self.bimp.config(state='disabled')
+        for b in (self.bexp, self.bdds, self.bimp):
+            b.config(state='disabled')
         self.say('Could not read %s' % name)
 
-    def show(self, info, img):
-        self.info, self.img = info, img
+    def show(self, name, path, orig, info, img):
+        self.name, self.path, self.orig, self.info, self.img = name, path, orig, info, img
         scale = self.draw()
-        self.title.config(text=info['name'][:-8])
-        self.details.config(text='Format: %s%s\nSize: %d x %d\nMip levels: %d%s' % (
-            info['format'], ' (sRGB)' if info['srgb'] else '', info['w'], info['h'], info['mips'],
-            '' if scale == 1 else '   (preview at %d%%)' % round(scale * 100)))
-        if info['importable'] and info['astc']:
+        self.title.config(text=name[:-8])
+        mod_note = '' if path is None or info['format'] == orig['format'] else \
+            '   (the game\'s copy is %s)' % orig['format']
+        self.details.config(text='Format: %s%s%s%s\nSize: %d x %d\nMip levels: %d%s' % (
+            info['format'], ' (sRGB)' if info['srgb'] else '', ' (signed: shown +128)' if info['snorm'] else '', mod_note,
+            info['w'], info['h'], info['mips'], '' if scale == 1 else '   (preview at %d%%)' % round(scale * 100)))
+        if orig['importable'] and orig['astc']:
             self.canimport.config(text='Can be imported: yes. The mod\'s copy is saved as BC7 (a bigger file); the tool '
                                        'raises the game\'s size table to match, in the mod "%s".' % SIZE_MOD, foreground='#060')
-        elif info['importable']:
-            self.canimport.config(text='Can be imported: yes (BC7).', foreground='#060')
+        elif orig['importable']:
+            self.canimport.config(text='Can be imported: yes (stays %s, same file size).' % orig['format'], foreground='#060')
         else:
-            self.canimport.config(text='Can be imported: not yet. ' + info['why_not'], foreground='#a50')
+            self.canimport.config(text='Can be imported: no. ' + orig['why_not'], foreground='#a50')
+        labels = [v[0] for v in self.versions] if self.versions and self.versions[0][1] is None else ['Original (game)']
+        self.vercb.config(values=labels, state='readonly' if len(labels) > 1 else 'disabled')
+        current = next((v[0] for v in self.versions if v[1] == path), labels[0])
+        self.ver.set(current)
         self.bexp.config(state='normal')
+        self.bdds.config(state='normal' if info['dds'] and hasattr(tt, 'export_dds') else 'disabled')
         self.bimp.config(state='normal')
-        self.say('%s: %s, %d x %d, %d mip levels' % (info['name'], info['format'], info['w'], info['h'], info['mips']))
+        self.say('%s: %s, %d x %d, %d mip levels; showing %s' % (name, info['format'], info['w'], info['h'], info['mips'],
+                                                                 current))
 
     def draw(self):
         """Draw the image to fit the preview area (on a checkerboard, so see-through parts show); returns the scale."""
@@ -458,36 +547,42 @@ class App:
         return scale
 
     # --- buttons
-    def export(self):
-        info = self.info
+    def export(self, ext):
+        info, name, path = self.info, self.name, self.path
         if not info or self.busy:
             return
-        png = filedialog.asksaveasfilename(parent=self.root, title='Export PNG', initialdir=self.cfg['last_dir'],
-                                           initialfile=info['name'][:-8] + '.png', defaultextension='.png',
-                                           filetypes=[('PNG image', '*.png')])
-        if not png:
+        kind = 'DDS' if ext == '.dds' else 'PNG'
+        mod = '' if path is None else '_' + os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(path))))
+        out = filedialog.asksaveasfilename(parent=self.root, title='Export %s%s' % (kind, '' if path is None else ' (mod copy)'),
+                                           initialdir=self.cfg['last_dir'], initialfile=name[:-8] + mod.replace(' ', '_') + ext,
+                                           defaultextension=ext, filetypes=[('%s image' % kind, '*' + ext)])
+        if not out:
             return
-        self.cfg['last_dir'] = os.path.dirname(png)
+        self.cfg['last_dir'] = os.path.dirname(out)
         save_config(self.cfg)
 
         def done(_, err):
             if err:
                 self.error('Export failed', err)
             else:
-                self.say('Exported %s -> %s' % (info['name'], png))
-                messagebox.showinfo('Exported', 'Saved %d x %d PNG:\n%s\n\nEdit it, keep the same size, then use Import PNG.'
-                                    % (info['w'], info['h'], png), parent=self.root)
-        self.work('Exporting %s...' % info['name'], lambda: self.be.export(info['name'], png), done)
+                self.say('Exported %s -> %s' % (name, out))
+                what = ('%d x %d PNG' % (info['w'], info['h']) if kind == 'PNG' else
+                        '%s DDS with %d mip levels' % (info['format'], info['mips']))
+                messagebox.showinfo('Exported', 'Saved %s:\n%s\n\nEdit it, keep the same size%s, then use Import.' % (
+                    what, out, '' if kind == 'PNG' else ' and format'), parent=self.root)
+        self.work('Exporting %s...' % name, lambda: self.be.export(name, out, path), done)
 
     def import_(self):
-        info = self.info
+        info, name = self.orig, self.name
         if not info or self.busy:
             return
         if not info['importable']:
-            self.error('Cannot import into this texture', ToolError('%s is %s.\n\n%s' % (info['name'], info['format'], info['why_not'])))
+            self.error('Cannot import into this texture', ToolError('%s is %s.\n\n%s' % (name, info['format'], info['why_not'])))
             return
-        png = filedialog.askopenfilename(parent=self.root, title='Pick the edited PNG for %s (%d x %d)' % (info['name'][:-8], info['w'], info['h']),
-                                         initialdir=self.cfg['last_dir'], filetypes=[('PNG image', '*.png')])
+        types = [('PNG or DDS', '*.png *.dds'), ('PNG image', '*.png'), ('DDS texture', '*.dds')] if hasattr(tt, 'read_dds') \
+            else [('PNG image', '*.png')]
+        png = filedialog.askopenfilename(parent=self.root, title='Pick the edited file for %s (%d x %d)' % (name[:-8], info['w'], info['h']),
+                                         initialdir=self.cfg['last_dir'], filetypes=types)
         if not png:
             return
         self.cfg['last_dir'] = os.path.dirname(png)
@@ -495,18 +590,18 @@ class App:
         try:
             self.be.check_import(info, png)
         except ToolError as e:
-            self.error('Cannot import this PNG', e)
+            self.error('Cannot import this file', e)
             return
         mod = ModPicker(self.root, self.be.mods()).result
         if not mod:
             return
         try:
-            dst = os.path.join(self.be.safe_mod_dir(mod), 'romfs', 'Tex', info['name'])
+            dst = os.path.join(self.be.safe_mod_dir(mod), 'romfs', 'Tex', name)
         except ToolError as e:
             self.error('Cannot use that mod folder', e)
             return
         if os.path.exists(dst) and not messagebox.askyesno(
-                'Replace?', 'The mod "%s" already has %s.\nReplace it?' % (mod, info['name']), parent=self.root):
+                'Replace?', 'The mod "%s" already has %s.\nReplace it?' % (mod, name), parent=self.root):
             return
 
         def done(path, err):
@@ -517,8 +612,14 @@ class App:
             how = {'on': 'It is already on in the Mods tab; restart the game to see it.',
                    'off': 'It is turned OFF: turn it on in the game\'s Mods tab, then restart the game.'}.get(
                 state, 'Turn it on in the game\'s Mods tab (menu), then restart the game.')
-            self.say('Imported %s into mod "%s"' % (info['name'], mod))
-            messagebox.showinfo('Imported', 'Done. Wrote:\n%s\n\n%s%s' % (path, how, self.size_note()), parent=self.root)
+            self.say('Imported %s into mod "%s"' % (name, mod))
+            # show the new copy in place of the old one
+            self.modded = self.be.modded()
+            self.filter()
+            self.versions = self.be.versions(name)
+            self.load(name, path)
+            messagebox.showinfo('Imported', 'Done. Wrote:\n%s\n\n%s%s\n\nThe preview now shows the mod\'s copy; use Show to '
+                                'compare it with the original.' % (path, how, self.size_note()), parent=self.root)
         self.work('Importing into %s (encoding every mip level, this can take a little while)...' % mod,
                   lambda: self.be.do_import(info, png, mod), done)
 
